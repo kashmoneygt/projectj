@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:," />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Flight jym · live benchmark for small pilot models</title>
+  </head>
+  <body>
+    <header class="bar">
+      <span class="brand"><span class="dots"><i></i><i></i><i></i><i></i></span>Flight jym</span>
+      <span class="modes" role="group" aria-label="Watch or play">
+        <button id="mode-watch" aria-pressed="true" title="Watch the model fly">Watch</button>
+        <button id="mode-play" aria-pressed="false" title="Fly it yourself">Play</button>
+      </span>
+      <span id="here" class="here" title="People with the jym open right now, watching or playing" hidden></span>
+      <span id="now" class="now">
+        <span id="live-badge" class="live-badge">LIVE</span>
+        <span id="now-models" class="now-models"></span>
+      </span>
+      <span id="play-controls" class="play-controls" hidden>
+        <label class="field" id="env-field"><span>Environment</span><select id="env"></select></label>
+        <label class="field" id="aircraft-field" hidden><span>Aircraft</span><select id="aircraft"></select></label>
+        <label class="field"><span>Objective</span><select id="task"></select></label>
+        <button id="goal-info" class="info" type="button" aria-label="About this objective, and how to fly it"></button>
+        <label class="field" id="player-field"><span>Player</span><select id="player"></select></label>
+        <label class="field seed"><span>Seed</span><input id="seed" type="number" min="0" step="1" value="0" /></label>
+        <button id="restart" class="primary" title="Start this objective again">Restart</button>
+      </span>
+      <span id="status" class="status" role="status"></span>
+      <span id="up-next" class="up-next" tabindex="0" hidden></span>
+      <span id="queue" class="modes queue" role="group" aria-label="Aircraft of the next flight" hidden></span>
+      <span class="right">
+        <a class="model-page" href="https://huggingface.co/projectj/Flight-Autopilot-Decision-Model-Maverick1.0"
+          target="_blank" rel="noopener" title="Maverick 1.0 on Hugging Face">🤗 Maverick 1.0</a>
+        <button id="runs-button" data-open="runs">Runs</button>
+        <button data-open="leaderboard">Leaderboard</button>
+        <button data-open="help">Help</button>
+        <button id="record" class="quiet" title="Save this view as a WebM video">Export video</button>
+      </span>
+    </header>
+
+    <main id="main">
+      <section id="stage">
+        <div id="notice" class="notice" hidden></div>
+        <div id="flight">
+          <canvas id="view" aria-label="Flight view"></canvas>
+          <canvas id="minimap" aria-label="Map, north up"></canvas>
+          <div class="view-buttons">
+            <button id="camera">Cockpit view (C)</button>
+            <button id="ghosts" aria-pressed="true" title="Show other players' recorded flights of this objective and seed">Ghosts</button>
+          </div>
+          <div id="ghost-legend" class="ghost-legend" hidden></div>
+          <div id="heat-card" class="heat-card" hidden></div>
+        </div>
+        <footer id="instruments" class="instruments"></footer>
+        <div id="replay" class="replay" hidden>
+          <button id="replay-play">Pause</button>
+          <input id="replay-time" type="range" min="0" max="1" step="0.01" value="0" aria-label="Replay time" />
+          <span id="replay-clock" class="mono"></span>
+          <select id="replay-speed" aria-label="Replay speed">
+            <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option>
+            <option value="4">4×</option><option value="8">8×</option>
+          </select>
+          <button id="replay-exit">Back to live</button>
+        </div>
+      </section>
+      <div id="divider" class="pane-divider" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the side panel"></div>
+      <aside id="rail"></aside>
+      <aside id="panel" role="dialog" aria-modal="false" hidden>
+        <button id="panel-close" class="close">Close</button>
+        <div id="panel-body"></div>
+      </aside>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

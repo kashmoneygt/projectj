@@ -1,0 +1,13 @@
+# only what deploy/Dockerfile copies
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!models.toml
+!src/
+!library/
+!deploy/jym.toml
+!ui/
+ui/node_modules/
+ui/dist/
+**/__pycache__/

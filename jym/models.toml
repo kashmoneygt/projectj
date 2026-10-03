@@ -1,0 +1,32 @@
+featured = ["maverick"]  # raced by `jym ui` against the environment's reference player
+
+[models.maverick]
+type = "gguf"
+source = "hf:projectj/Flight-Autopilot-Decision-Model-Maverick1.0/Flight-Autopilot-Decision-Model-Maverick1.0-Q8_0.gguf"
+revision = "main"
+title = "Maverick"
+role = "ours"
+trained = """\
+An open source System 1 decision model for flight. \
+Trained with reinforcement learning (imitation + PPO) and exported as a Qwen3 0.6B GGUF model. \
+Able to fly many aircraft in JSBSim physics engine, including Cessna 172 and drone models. \
+Robust to model response latency (tested with 5-5000ms)."""
+
+[models."qwen-0.6b"]
+type = "gguf"
+source = "hf:Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf"
+revision = "23749fefcc72300e3a2ad315e1317431b06b590a"
+title = "Qwen 0.6B"
+role = "base model"
+trained = "The default Qwen3 0.6B model."
+
+[models.jev]
+type = "jev"
+title = "Jev"
+role = "API model"
+deployed = "A System 1 decision model from TypeSafe (closed source)."
+
+[models.laya]
+type = "laya"
+title = "Laya"
+deployed = "An open-source System 1 classifier model running locally."

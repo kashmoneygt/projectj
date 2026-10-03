@@ -1,0 +1,6 @@
+# hosted jym settings (jym host --settings deploy/jym.toml)
+players = ["maverick@cpu", "reference"]  # who races in every heat
+recorded = ["jev", "qwen-0.6b@gpu"]  # who races as replays (heats only fly the seeds they have all flown)
+stream = ["rings", "gauntlet", "drone-rings", "drone-gauntlet"]  # the objectives heats pick from
+play = "rings"  # default objective in Play
+rooms = 100  # max visitors playing at once

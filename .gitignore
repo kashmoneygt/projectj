@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# web UI
+node_modules/
+jym/ui/dist/
+
+# local settings and caches
+.env
+.env.*
+!.env.example
+.cache/
+
+# models, runs and training outputs
+models/
+runs/
+*.gguf
+training/output/

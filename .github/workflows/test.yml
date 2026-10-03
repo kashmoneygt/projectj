@@ -1,0 +1,70 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  jym:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jym
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm --prefix ui ci
+      - run: npm --prefix ui run build
+      - run: npm --prefix ui test
+
+  training:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: training
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run pytest -q
+
+  # deploy on pushes to main, with OpenID Connect (see jym/deploy/github-oidc.sh)
+  deploy:
+    needs: jym
+    if: github.repository == 'kashmoneygt/projectj' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: jym
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - run: deploy/azure.sh
