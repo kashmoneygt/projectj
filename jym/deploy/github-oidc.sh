@@ -8,7 +8,7 @@ LOCATION=eastus2
 DEPLOY_APP=jym-deploy
 ISSUER=https://token.actions.githubusercontent.com
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-SUBJECT="repo:${REPO}:ref:refs/heads/main"
+SUBJECT="$(gh api "repos/${REPO}/actions/oidc/customization/sub" --jq .sub_claim_prefix):ref:refs/heads/main"
 SUBSCRIPTION=$(az account show --query id -o tsv)
 TENANT=$(az account show --query tenantId -o tsv)
 
