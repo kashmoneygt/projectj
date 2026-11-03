@@ -175,11 +175,8 @@ def test_pi_task_prompt_ignores_child(tmp_path) -> None:
     (pkg / "prompts" / "task-rules.md").write_text("CHILD RULE TEXT")
     instance = core.Instance(instance_id="a__b-1", repo="a/b", base_commit="c", problem_statement="FIX IT")
     prompt = h.task_prompt(instance=instance)
+    assert prompt == f"FIX IT\n\n{h.task_rules.read_text()}"
     assert "CHILD RULE TEXT" not in prompt
-    assert prompt.startswith("FIX IT")
-    assert "Task rules" in prompt
-    assert "hidden tests" in prompt and "diff" in prompt
-    assert "step by step" not in prompt and "minimal" not in prompt
 
 
 def test_pi_copy_variant_resources(tmp_path) -> None:

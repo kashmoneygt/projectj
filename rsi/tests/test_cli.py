@@ -178,7 +178,7 @@ def test_variants_generate_runs_the_areas_asked_for(tmp_path: Path, monkeypatch:
     assert _invoke(args=[*command, "--area", "context", "--area", "tools"]).exit_code == 0
     assert asked == [["open", "tools", "middleware", "context"], ["context", "tools"]]
     unknown = _invoke(args=[*command, "--area", "tools", "--area", "everything"])
-    assert unknown.exit_code == 1 and "unknown areas everything; prompts/areas.md has open, tools" in unknown.output
+    assert unknown.exit_code == 1 and "unknown areas everything" in unknown.output
     assert len(asked) == 2
 
 

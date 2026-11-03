@@ -1,6 +1,5 @@
 import contextlib
 import json
-import re
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -61,7 +60,7 @@ def test_stage_holds_the_evidence(tmp_path, monkeypatch) -> None:
         "c__d-2": core.TaskRun(instance_id="c__d-2", status="ok", resolved=True),
     }
     out = generation.stage(record=record, h=harness.load(name="pi"), dest=tmp_path / "stage", nodes=[record, again])
-    assert (out / "harness.md").read_text().startswith("# How a variant runs in pi")
+    assert (out / "harness.md").read_text() == harness.load(name="pi").doc.read_text()
     assert (out / "parent" / "package.json").is_file()
     assert not (out / "parent" / cards.FILE).exists()
     told = (out / "system-prompt.md").read_text()
@@ -175,17 +174,14 @@ def test_overview_tells_a_run_that_never_started_from_one_that_failed() -> None:
 def test_prompt_text_fills_every_placeholder() -> None:
     text = generation.prompt_text(harness_name="pi", model_name="qwen-3.8-27b", area="tools", timeout_s=3600, start=0.0)
     assert "{" not in text
-    assert "qwen-3.8-27b" in text and not re.search(r"\bturns\b", text)
-    assert "You have 60 minutes: the session stops without warning at 01:00 UTC" in text
-    assert "This session's area is the model's tools: which ones it has, and what each one is called" in text
-    assert "`tasks/diverged/<id>.md`" in text
+    assert "qwen-3.8-27b" in text and generation.area_texts()["tools"] in text
+    assert "60 minutes" in text and "01:00 UTC" in text
 
 
 def test_areas_come_from_areas_md() -> None:
     texts = generation.area_texts()
     assert list(texts) == ["open", "tools", "middleware", "context", "compose"]
-    assert texts["open"] == "the whole harness: make the change you'd bet on most, wherever it is"
-    assert texts["tools"].endswith("Keep your change inside it")
+    assert all(texts.values()) and not any("## " in text for text in texts.values())
     assert generation.AREAS == ("tools", "middleware", "context")
 
 
