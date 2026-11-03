@@ -1,0 +1,17 @@
+{
+  "name": "@projectj/pi-baseline",
+  "version": "0.1.0",
+  "description": "Project J RSI baseline: plain pi, nothing added; the evaluation instrumentation is runner-installed, outside this package",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "extensions/*.ts"
+    ],
+    "skills": [
+      "skills/*"
+    ]
+  }
+}
