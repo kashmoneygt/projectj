@@ -1,0 +1,17 @@
+{
+  "name": "@projectj/pi-work-from-repo-not-recall",
+  "version": "0.1.0",
+  "description": "Steers the agent off reconstructing upstream fixes from memory and back to the code in the repo",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "extensions/*.ts"
+    ],
+    "skills": [
+      "skills/*"
+    ]
+  }
+}
