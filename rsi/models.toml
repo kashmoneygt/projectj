@@ -1,0 +1,37 @@
+# Models served on the host machine (fields in ModelSpec, src/rsi/core.py). Values follow each vendor's model card
+# and stay fixed for the life of a model line.
+
+[models."gemma-4-12b"]
+# https://huggingface.co/google/gemma-4-12B-it
+source = "hf:unsloth/gemma-4-12b-it-GGUF/gemma-4-12b-it-UD-Q4_K_XL.gguf"
+model_id = "gemma-4-12b-it"
+port = 11500
+ctx = 131072
+parallel = 1  # llama.cpp splits ctx across parallel requests
+seed = 42
+thinking = true
+max_output_tokens = 16384  # bounds runaway thinking
+sampling = { temperature = 1.0, top_p = 0.95, top_k = 64 }
+chat_template_kwargs = { enable_thinking = true }
+
+[models."qwen-3.8-27b"]
+# https://huggingface.co/Qwen/Qwen3.8-27B (thinking mode)
+source = "splash:unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M"
+model_id = "qwen-3.8-27b"
+backend = "splash"
+port = 11501
+ctx = 131072  # the native 262144 doesn't fit next to the weights on a 36GB Mac
+parallel = 1
+seed = 42  # splash takes no seed
+thinking = true
+max_output_tokens = 0
+sampling = { temperature = 1.0, top_p = 0.95, top_k = 20, min_p = 0.0, presence_penalty = 0.0, repetition_penalty = 1.0 }
+# medium adds nothing to the system prompt, unlike the default xhigh
+chat_template_kwargs = { enable_thinking = true, reasoning_effort = "medium", preserve_thinking = true }
+thinking_budget_field = "thinking_token_budget"
+
+# Teachers that write variants (fields in TeacherSpec, src/rsi/core.py)
+[teachers.opus]
+agent = "copilot"
+model = "claude-opus-5.5"
+effort = "max"

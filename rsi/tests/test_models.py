@@ -1,0 +1,136 @@
+import json
+import socket
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from rsi import core, folders, models, paths
+
+
+def test_parse_source_hf_and_path() -> None:
+    llama = folders.module(root=paths.backends_dir(), name="llama.cpp", file="backend.py")
+    assert llama.parse_source(source="hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf") == (
+        "unsloth/Qwen3.8-27B-GGUF",
+        "Qwen3.8-27B-UD-Q4_K_M.gguf",
+    )
+    assert llama.parse_source(source="path:/tmp/m.gguf") == Path("/tmp/m.gguf")
+    for bad in ("hf:onlyonepart", "ftp://x"):
+        with pytest.raises(ValueError):
+            llama.parse_source(source=bad)
+
+
+def test_registry_lookup() -> None:
+    specs = models.registry()
+    assert "gemma-4-12b" in specs
+    assert models.get(name="gemma-4-12b").port == 11500
+    with pytest.raises(KeyError):
+        models.get(name="nope")
+
+
+def test_make_backend() -> None:
+    spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x")
+    backend = models.make_backend(spec=spec)
+    assert type(backend).__name__ == "LlamaServer"
+    assert backend.spec is spec
+    bad = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x", backend="vllm")
+    with pytest.raises(FileNotFoundError):
+        models.make_backend(spec=bad)
+
+
+def test_server_urls_endpoint_and_log_parsing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x", port=1234, ctx=4096)
+    server = models.make_backend(spec=spec)
+    assert server.host_url() == "http://127.0.0.1:1234/v1"
+    assert server.is_running() is False
+    assert server.endpoint() == core.ModelEndpoint(
+        model_id="x", base_url="http://host.docker.internal:1234/v1", root_url="http://host.docker.internal:1234"
+    )
+
+    server.log_path.parent.mkdir(parents=True, exist_ok=True)
+    server.log_path.write_text(
+        "cache hit: 10.0%\nprompt eval time = 100.0 ms / 100 tokens ( 1.00 ms per token, 1000.00 tokens per second)\n"
+        "eval time = 1000.0 ms / 50 new tokens ( 20.00 ms per token, 50.00 tokens per second)\n"
+        "cache hit: 50.0%\nprompt eval time = 100.0 ms / 200 tokens ( 1.00 ms per token, 2000.00 tokens per second)\n"
+        "eval time = 2000.0 ms / 100 new tokens ( 20.00 ms per token, 50.00 tokens per second)\n"
+    )
+    stats = server.log_stats()
+    assert stats is not None
+    assert isinstance(stats, core.ServerStats)
+    assert stats.requests == 2
+    assert stats.avg_cache_hit == 30.0
+    assert stats.prompt_tokens == 300
+    assert stats.completion_tokens == 150
+    assert stats.tok_s == 50.0
+
+
+def test_log_stats_missing_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x")
+    assert models.make_backend(spec=spec).log_stats() is None
+
+
+def test_stop_kills_via_pid_file(tmp_path, monkeypatch) -> None:
+    # stop() works from the pid file, since `models down` runs in another process
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x")
+    server = models.make_backend(spec=spec)
+    proc = subprocess.Popen(["sleep", "30"])
+    server.pid_path.parent.mkdir(parents=True, exist_ok=True)
+    server.pid_path.write_text(str(proc.pid))
+    try:
+        server.stop()
+        deadline = time.time() + 5
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.1)
+        assert proc.poll() is not None
+        assert not server.pid_path.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+class _FakeLlama(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        request = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        ok = self.path == "/v1/chat/completions" and request["max_tokens"] == 1
+        data = json.dumps({"choices": [{"message": {"content": "H"}}]} if ok else {"error": "no"}).encode()
+        self.send_response(200 if ok else 500)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:  # keep the fake server quiet
+        pass
+
+
+def test_llama_identity_and_health(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    binary = tmp_path / "llama-server"
+    binary.write_text(
+        "#!/bin/sh\necho 'version: 0.7.0 (build 11669, commit 620d2225c)' >&2\necho 'built with clang' >&2\n"
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("RSI_LLAMA_BIN", str(binary))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = models.make_backend(spec=core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x", port=port))
+    assert server.identity() == {
+        "version": "version: 0.7.0 (build 11669, commit 620d2225c)",
+        "source": "path:/tmp/x.gguf",
+    }
+    assert server.status_lines() == [f"binary: {binary}", "  version: 0.7.0 (build 11669, commit 620d2225c)"]
+    assert server.healthy(timeout_s=1) is False
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _FakeLlama)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        assert server.healthy(timeout_s=5) is True
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
