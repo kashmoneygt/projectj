@@ -14,7 +14,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rsi import core, generation, harness, paths, runs, stats, tree, variants
+from rsi import cards, core, generation, harness, paths, runs, stats, tree, variants
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def tree_data() -> dict:
         members.setdefault(tree.lineage(name=n.name, nodes=nodes)[0].name, []).append(n)
     roots = sorted((by_name[name] for name in members), key=lambda n: -n.created)
     lineages = [_lineage(root=r, members=members[r.name], entries=entries, nodes=nodes, now=now) for r in roots]
-    return {"now": now, "lineages": lineages}
+    return {"now": now, "areas": generation.area_texts(), "lineages": lineages}
 
 
 def _lineage(
@@ -105,6 +105,9 @@ def _harness(
         "name": name,
         "title": _title(entry=entry, node=own[0] if own else None, name=name),
         "area": entry.area if entry is not None else "",
+        "round": entry.round if entry is not None else "",
+        "ports": list(entry.ports) if entry is not None else [],
+        "changed": entry.diff if entry is not None else "",  # the files it changed, in one line
         "created": datetime.fromisoformat(entry.created).timestamp() if entry is not None else own[0].created,
         "href": f"#node/{own[0].name}" if own else f"#variant/{name}",
         "runs": [_run_chip(node=n, probe=probe, now=now) for n in own],
@@ -179,7 +182,9 @@ def _label(node: core.Node) -> str:
 
 def _title(entry: variants.VariantEntry | None, node: core.Node | None, name: str) -> str:
     if entry is not None:
-        return entry.title
+        # the card has the whole title, while tree.json keeps it cut short
+        card = cards.read(package=paths.variants_dir() / entry.name, title_max=None)
+        return card.title if card is not None else entry.title
     if node is not None and not node.variant:
         return f"{node.harness} {node.harness_version}, no changes"
     return (node.suggestion if node is not None else None) or name

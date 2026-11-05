@@ -28,7 +28,7 @@ def _field_name(key: str) -> str:
     return "predicts" if key.startswith("predict") else "ports" if key.startswith("port") else key
 
 
-def parse(text: str) -> VariantCard:
+def parse(text: str, title_max: int | None = TITLE_MAX) -> VariantCard:
     """Parse a card in any format, using loose text as the hypothesis if it has none"""
     title = ""
     parts: dict[str, list[str]] = {}
@@ -53,8 +53,8 @@ def parse(text: str) -> VariantCard:
         else:
             loose.append(line)
     fields = {key: " ".join(values) for key, values in parts.items()}
-    if len(title) > TITLE_MAX:
-        title = title[: TITLE_MAX - 1].rstrip() + "…"
+    if title_max is not None and len(title) > title_max:
+        title = title[: title_max - 1].rstrip() + "…"
     return VariantCard(
         title=title,
         hypothesis=fields.get("hypothesis") or " ".join(loose),
@@ -64,11 +64,12 @@ def parse(text: str) -> VariantCard:
     )
 
 
-def read(package: Path) -> VariantCard | None:
+def read(package: Path, title_max: int | None = TITLE_MAX) -> VariantCard | None:
+    """Read a package's card, with its title cut to title_max characters (None keeps all of it)"""
     file = package / FILE
     if not file.is_file():
         return None
-    card = parse(text=file.read_text(errors="replace"))
+    card = parse(text=file.read_text(errors="replace"), title_max=title_max)
     return card if card.title else dataclasses.replace(card, title=package.name.replace("-", " ").replace("_", " "))
 
 

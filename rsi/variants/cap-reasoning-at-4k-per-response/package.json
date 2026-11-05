@@ -1,0 +1,17 @@
+{
+  "name": "@projectj/pi-cap-reasoning-at-4k-per-response",
+  "version": "0.1.0",
+  "description": "Parent package (evidence system prompt, finish guard and review) with each response's reasoning capped at 4096 tokens instead of 8192",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "extensions/*.ts"
+    ],
+    "skills": [
+      "skills/*"
+    ]
+  }
+}

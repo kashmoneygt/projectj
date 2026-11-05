@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from rsi import cards, core, paths, runs, variants, viewer
+from rsi import cards, core, generation, paths, runs, variants, viewer
 
 
 def _assistant(stamp: int, thinking: str, calls: list[dict], text: str = "", stop: str = "toolUse") -> dict:
@@ -115,7 +115,9 @@ def lineage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, core.N
 
 
 def test_the_tree_is_harnesses_with_their_runs_and_how_each_did(lineage: dict[str, core.Node]) -> None:
-    (found,) = viewer.tree_data()["lineages"]
+    data = viewer.tree_data()
+    assert set(data["areas"]) == {"open", *generation.AREAS, "compose"}
+    (found,) = data["lineages"]
     assert (found["model"], found["harness"], found["root"]["name"]) == ("qwen-3.8-27b", "pi 1.4.0", "root")
     assert (found["made"], found["ran"], found["better"], found["probe"], found["best"]) == (2, 1, 0, None, None)
     base = found["tree"]
@@ -123,11 +125,20 @@ def test_the_tree_is_harnesses_with_their_runs_and_how_each_did(lineage: dict[st
     assert [r["name"] for r in base["runs"]] == ["root", "repeat"]
     cap, later = base["children"]
     assert (cap["title"], cap["href"]) == ("Cap thinking", "#node/variant")
+    assert (base["changed"], cap["changed"]) == ("", "+ settings.json")
+    assert (cap["round"], cap["ports"]) == ("", [])
     assert [r["name"] for r in cap["runs"]] == ["variant"]
     assert (cap["solved"], cap["of"]) == (2.0, 2)
     assert cap["standing"]["solves"]["gain"] == 1.0 and cap["standing"]["reference_runs"] == 2
     assert cap["standing"]["better_by"] == ""
     assert (later["runs"], later["href"], later["standing"]) == ([], "#variant/later", None)
+
+
+def test_the_tree_shows_a_variants_whole_title(lineage: dict[str, core.Node]) -> None:
+    title = "Cap thinking" + " and keep going" * 10
+    (paths.variants_dir() / "cap" / cards.FILE).write_text(f"# {title}\nhypothesis: h\n")
+    (found,) = viewer.tree_data()["lineages"]
+    assert len(title) > cards.TITLE_MAX and found["tree"]["children"][0]["title"] == title
 
 
 def test_the_tree_names_the_variant_that_solved_the_most_on_the_probe_set(lineage: dict[str, core.Node]) -> None:

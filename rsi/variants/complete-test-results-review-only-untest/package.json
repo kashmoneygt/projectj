@@ -1,0 +1,17 @@
+{
+  "name": "@projectj/pi-complete-test-results-review-only-untested",
+  "version": "0.1.0",
+  "description": "Issue-evidence system prompt and thinking cap as in the parent; bash test runs get back the verdict and failing tests a filter cut, and test labels that name no module are explained; the finish review runs only when the change is empty, untested since the last edit (a run that ran no test does not count), its last test run after the last edit reported failures, or it leaves new untracked files",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "extensions/*.ts"
+    ],
+    "skills": [
+      "skills/*"
+    ]
+  }
+}

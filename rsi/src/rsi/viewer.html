@@ -31,6 +31,7 @@ box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 50%,transparent);animation:pulse 
 @keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 45%,transparent)}
 70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
 main{max-width:1040px;margin:0 auto;padding:12px 16px 80px}
+body.wide main,body.wide .top-in{max-width:1400px}
 .seg{display:flex;background:var(--hover);border-radius:8px;padding:2px}
 .seg button{border:0;background:none;padding:4px 12px;border-radius:6px;cursor:pointer;color:var(--muted);
 font-size:13px}
@@ -74,7 +75,7 @@ border:1px solid var(--line);border-radius:12px;padding:11px 14px;max-width:860p
 font-size:12px;color:var(--muted);background:var(--panel);font-variant-numeric:tabular-nums;white-space:nowrap}
 .run:hover{color:var(--ink);border-color:var(--faint)}
 .run .dot{width:8px;height:8px}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:12px}
 .tile{border:1px solid var(--line);border-radius:10px;padding:9px 12px;background:var(--bg);min-width:0}
 .tile .k{font-size:12px;color:var(--muted)}
 .tile .v{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.02em;margin-top:1px}
@@ -89,7 +90,67 @@ font-size:12px;color:var(--muted);background:var(--panel);font-variant-numeric:t
 .bar{height:5px;border-radius:3px;background:var(--hover);margin-top:4px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--ok);border-radius:3px}
 .n-score .vs{font-size:12px;color:var(--muted);margin-top:3px}
-
+.sgbox{overflow-x:auto}
+.sg{min-width:640px;margin-top:2px}
+.sgr{display:grid;grid-template-columns:84px minmax(0,1fr) clamp(150px,22%,260px) 192px}
+.sgr.h>div:not(.plot){align-self:center}
+.sgr>.lead{grid-column:span 2}
+.sgr>.vt{padding-right:2px}
+.vtype{display:inline-block;font-size:11px;line-height:18px;padding:0 6px;border-radius:9px;background:var(--hover);
+cursor:default;white-space:nowrap}
+.sgr>div{min-width:0;padding:9px 10px 9px 8px}
+.sgr>.plot{position:relative;padding:0}
+.sgr>.plot>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.sgr.h:hover{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+.sgr.grp>div{padding:8px 8px 0;color:var(--muted);font-size:12px}
+.sgr.grp>div:not(.plot){border-top:1px solid var(--line)}
+.sgr.axis>div{height:32px;padding:4px 8px;color:var(--muted);font-size:12px;line-height:24px;display:flex;gap:10px}
+.seg.scale button{padding:0 8px;font-size:12px;line-height:20px}
+.sg .m{color:var(--muted)}
+.kv{font-size:13px;line-height:20px}
+.kv .k{color:var(--muted)}
+.kv a{font-weight:600}.kv a:hover{color:var(--accent)}
+.kv .id{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+.files{display:flex;flex-wrap:wrap;align-items:center;gap:2px 5px}
+.file{font:11px/16px var(--mono);border:1px solid var(--line);background:var(--bg);border-radius:5px;padding:0 5px;
+cursor:pointer;overflow-wrap:anywhere;text-align:left}
+.file:hover{border-color:var(--accent)}
+.file i{font-style:normal;margin-left:5px}.file .a{color:var(--ok)}.file .d{color:var(--bad)}
+.nums{font-size:13px;line-height:20px;font-variant-numeric:tabular-nums}
+.nums a:hover{color:var(--accent)}.nums .good{color:var(--ok)}.nums .bad{color:var(--bad)}
+.sg .tick{fill:var(--faint);font-size:11px;text-anchor:middle;font-variant-numeric:tabular-nums}
+.sg .grid,.sg .sep{stroke:var(--line)}
+.sg .base{stroke:var(--muted);stroke-dasharray:3 4}
+.sg .lane,.sg .branch{fill:none;stroke:var(--faint);stroke-width:1.5}
+.sg .branch{vector-effect:non-scaling-stroke}
+.sg .lane.on,.sg .branch.on{stroke:var(--accent);stroke-width:2.5}
+.sg .branch.wait{stroke-dasharray:3 3}
+.sg .whisk{stroke:var(--muted);stroke-width:1.5}
+.sg .one{fill:var(--muted)}.sg a:hover .one{fill:var(--ink)}
+.sg .pt{fill:var(--faint);stroke:var(--panel);stroke-width:2}
+.sg .pt.root{fill:var(--ink)}.sg .pt.better{fill:var(--ok)}.sg .pt.worse{fill:var(--bad)}
+.sg .pt.on{stroke:var(--accent);stroke-width:2.5}
+.sg .pt.wait{fill:var(--panel);stroke:var(--faint);stroke-width:1.5;stroke-dasharray:2 2}
+.sg .live{animation:blink 1.4s infinite}
+.tools{display:flex;gap:8px;align-items:center}
+.tip{position:fixed;z-index:20;display:none;max-width:360px;pointer-events:none;background:var(--panel);
+border:1px solid var(--line);border-radius:10px;padding:8px 11px;font-size:12.5px;line-height:1.5;
+box-shadow:0 6px 24px rgba(0,0,0,.14)}
+.tip.wide{max-width:min(720px,calc(100vw - 16px))}
+.tip .tt{font-weight:600}.tip .tm{color:var(--muted);font-family:var(--mono);font-size:11.5px;margin-bottom:4px}
+.tip .m{color:var(--muted)}
+.tip .diff{max-height:none;overflow:hidden;margin:6px 0}
+.path{font-family:var(--mono);font-weight:600;font-size:12.5px;overflow-wrap:anywhere}
+.dlg{border:1px solid var(--line);border-radius:12px;padding:0;width:min(980px,calc(100vw - 32px));
+max-height:calc(100vh - 64px);background:var(--panel);color:var(--ink);box-shadow:0 16px 48px rgba(0,0,0,.25)}
+.dlg::backdrop{background:rgba(0,0,0,.3)}
+.dlg>.in{display:flex;flex-direction:column;max-height:calc(100vh - 66px)}
+.dlg .hd{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;border-bottom:1px solid var(--line)}
+.dlg .hd .m{color:var(--muted);font-size:12.5px}
+.dlg .x{margin-left:auto;border:0;background:none;font-size:22px;line-height:1;color:var(--muted);cursor:pointer}
+.dlg .x:hover{color:var(--ink)}
+.dlg .bd{overflow:auto}
+.dlg .diff{border:0;border-radius:0;max-height:none;overflow:visible}
 /* panels */
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0}
 .panel h2{font-size:15px;margin:0 0 10px;font-weight:620}
@@ -216,6 +277,8 @@ details>summary:hover{color:var(--ink)}
   <div class="livebar"><span class="pulse" id="pulse"></span><span id="stamp">connecting…</span></div>
 </div></header>
 <main id="main"><div class="empty">Loading…</div></main>
+<div class="tip" id="tip"></div>
+<dialog class="dlg" id="dlg"></dialog>
 <script>
 const $ = (s, el = document) => el.querySelector(s);
 const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -254,7 +317,10 @@ const fmtMs = (ms) => {
 };
 const num = (x) => (Number.isInteger(x) ? String(x) : x.toFixed(1));
 const signed = (x, digits) => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(digits);
-const signedPct = (x) => (x >= 0 ? '+' : '−') + Math.abs(Math.round(100 * x)) + '%';
+const signedPct = (x) => {
+  const p = Math.round(100 * x);
+  return (p > 0 ? '+' : p < 0 ? '−' : '') + Math.abs(p) + '%';
+};
 const pct = (a, b) => (b ? Math.round((100 * (a - b)) / b) : 0);
 const when = (t) => new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit',
   minute: '2-digit' });
@@ -303,6 +369,8 @@ async function route() {
   const next = parseHash(), before = VIEW;
   const samePage = before && before.page === next.page && before.name === next.name;
   VIEW = next;
+  hideTip();
+  document.body.classList.toggle('wide', next.page === 'tree');
   if (!samePage) {
     DATA = null;
     $('#main').innerHTML = '<div class="empty">Loading…</div>';
@@ -315,9 +383,10 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 document.addEventListener('keydown', (e) => {
-  // Esc goes up a level: closes an open task, or goes back to the tree
+  // Esc goes up a level: closes an open diff or task, or goes back to the tree
   if (e.key !== 'Escape' || !VIEW || e.target.closest?.('input, select, textarea')) return;
-  if (VIEW.page === 'node' && VIEW.open) closeOpen();
+  if ($('#dlg').open) $('#dlg').close();
+  else if (VIEW.page === 'node' && VIEW.open) closeOpen();
   else if (VIEW.page !== 'tree') location.hash = '#';
 });
 
@@ -386,6 +455,7 @@ const runChip = (r, label) => '<a class="run" href="#node/' + enc(r.name) + '" t
 // the tree
 function renderTree() {
   header([{ text: 'Tree' }], '');
+  TIPS = [];
   const empty = '<div class="empty">No runs yet</div>';
   $('#main').innerHTML = DATA.lineages.length ? DATA.lineages.map(lineageHtml).join('') : empty;
 }
@@ -406,11 +476,313 @@ function lineageHtml(l) {
       + esc(b.solves.verdict), cls));
   }
   tiles.push(tile('Agent time', l.hours.toFixed(1) + '<span> h</span>', 'over ' + count(l.tree) + ' runs'));
+  const views = '<div class="seg home-view">' + [['graph', 'Graph'], ['cards', 'Cards']].map(([v, label]) => '<button '
+    + 'data-v="' + v + '"' + (v === HOME ? ' class="on"' : '') + '>' + label + '</button>').join('') + '</div>';
+  const graph = HOME === 'graph' ? scoreGraph(l) : '';
   return '<section class="lineage"><section class="panel"><div class="toolbar" style="margin:0"><h2>' + esc(l.model)
-    + ' · ' + esc(l.harness) + ' · ' + esc(l.benchmark) + '</h2>'
-    + '<a class="linkbtn" href="#flips">Tasks across runs</a></div><div class="tiles">' + tiles.join('')
-    + '</div></section><ul class="tree"><li>' + harnessItem(l.tree) + '</li></ul></section>';
+    + ' · ' + esc(l.harness) + ' · ' + esc(l.benchmark) + '</h2><div class="tools">' + views
+    + '<a class="linkbtn" href="#flips">Tasks across runs</a></div></div><div class="tiles">' + tiles.join('')
+    + '</div></section>' + (graph || '<ul class="tree"><li>' + harnessItem(l.tree) + '</li></ul>') + '</section>';
 }
+
+// every harness on a number line of its score on the probe set, branching from the one it was made from
+const PAD = 6; // % of the plot left clear at each end
+const waiting = (c) => (c.runs.length ? runWhat(c.runs[c.runs.length - 1]) : 'not run yet');
+// a branch from a lane at the top of a row down to the dot in its middle, in a box that stretches with the row
+function branch(xp, xk, cls) {
+  if (xp === xk) return '<line class="branch' + cls + '" x1="' + xp + '%" y1="0" x2="' + xp + '%" y2="50%"/>';
+  const [a, b] = xk > xp ? [0, 100] : [100, 0];
+  return '<svg x="' + Math.min(xp, xk) + '%" width="' + +Math.abs(xk - xp).toFixed(2) + '%" height="50%" '
+    + 'viewBox="0 0 100 10" preserveAspectRatio="none" overflow="visible"><path class="branch' + cls + '" d="M' + a
+    + ' 0C' + a + ' 5 ' + b + ' 5 ' + b + ' 10"/></svg>';
+}
+// a round's id is the local time it started, like 20261029-194105
+const roundDay = (id) => new Date(+id.slice(0, 4), +id.slice(4, 6) - 1, +id.slice(6, 8))
+  .toLocaleDateString([], { month: 'short', day: 'numeric' });
+// the kind of variant a teacher session was asked for, with that session's brief on hover
+function areaTag(area, ports) {
+  if (!area) return '';
+  const tip = '<div class="tt">' + esc(area) + '</div><div class="m">The teacher\'s brief for this type of variant:'
+    + '</div><div>' + esc(DATA.areas[area] ?? '') + '</div>'
+    + (ports.length ? '<div class="m">Reuses ideas from ' + esc(ports.join(', ')) + '</div>' : '');
+  return '<span class="vtype" data-tip="' + addTip(tip) + '">' + esc(area) + '</span>';
+}
+// "~ a.ts (+1 -2), + b.json" as files, each new, deleted or with its lines added and removed
+const changes = (summary) => summary.split(', ').map((part) => {
+  const m = /^([+~-]) (.+?)(?: \(\+(\d+) -(\d+)\))?$/.exec(part);
+  return m ? { op: m[1], path: m[2], added: +(m[3] ?? 0), removed: +(m[4] ?? 0) } : { text: part };
+});
+let TIPS = [];
+const addTip = (html) => TIPS.push(html) - 1;
+const stored = (key, fallback) => {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+};
+const store = (key, value) => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+};
+let HOME = stored('rsi-home', 'graph');
+let SCALE = stored('rsi-scale', 'fit');
+function scoreGraph(l) {
+  const node = (c, parent) => {
+    const runs = c.runs.filter((r) => r.probe && r.total);
+    const n = { c, parent, runs, x: runs.length ? runs.reduce((a, r) => a + r.resolved, 0) / runs.length : null };
+    n.kids = c.children.map((k) => node(k, n));
+    return n;
+  };
+  const root = node(l.tree, null);
+  if (root.x == null) return '';
+  // a parent's variants and live teacher rounds come right after it under a header for each round they came from,
+  // and the next layer grows from promoted ones
+  const rows = [{ n: root }];
+  const grow = (n) => {
+    const made = [...n.kids.map((k) => ({ n: k, parent: n, id: k.c.round })),
+      ...n.c.teacher.map((r) => ({ live: r, parent: n, id: r.id }))];
+    made.forEach((r, i) => {
+      if (!i || r.id !== made[i - 1].id) rows.push({ from: n, id: r.id });
+      rows.push(r);
+    });
+    n.kids.forEach(grow);
+  };
+  grow(root);
+  const scores = rows.flatMap((r) => (r.n ? r.n.runs.map((x) => x.resolved) : []));
+  const of = root.runs[0].total;
+  const fit = [Math.max(0, Math.min(...scores) - 1), Math.min(of, Math.max(...scores) + 1)];
+  const [lo, hi] = SCALE === 'full' ? [0, of] : fit;
+  const X = (v) => +(PAD + ((v - lo) / (hi - lo)) * (100 - 2 * PAD)).toFixed(2);
+  // at most 7 labels so they fit a narrow plot, with a grid line between labels when they skip a step
+  const step = [1, 2, 5, 10, 20, 50].find((s) => (hi - lo) / s <= 7), minor = step % 2 ? step : step / 2;
+  const ticks = [];
+  for (let t = Math.ceil(lo / minor) * minor; t <= hi; t += minor) ticks.push(t);
+  // each row draws its own piece of every lane, so a row can be as tall as its text
+  const parents = [...new Set(rows.filter((r) => r.from && r.from.x != null).map((r) => r.from))];
+  const lanes = parents.map((p) => {
+    const kids = rows.flatMap((k, i) => (k.parent === p ? [i] : []));
+    const promoted = kids.filter((i) => rows[i].n?.kids.length);
+    return { x: X(p.x), start: rows.findIndex((k) => k.n === p), end: kids[kids.length - 1],
+      on: promoted.length ? promoted[promoted.length - 1] : -1 };
+  });
+  const plot = (i, own) => {
+    const down = (x, y1, cls) => '<line class="' + cls + '" x1="' + x + '%" y1="' + y1 + '" x2="' + x + '%" '
+      + 'y2="100%"/>';
+    let s = (rows[i].from ? '<line class="sep" x1="0" y1="0.5" x2="100%" y2="0.5"/>' : '')
+      + ticks.map((t) => down(X(t), 0, 'grid')).join('') + down(X(root.x), i ? 0 : '50%', 'base');
+    lanes.forEach((g) => {
+      if (i >= g.start && i < g.end) s += down(g.x, i === g.start ? '50%' : 0, 'lane' + (i < g.on ? ' on' : ''));
+    });
+    return '<div class="plot"><svg>' + s + own + '</svg></div>';
+  };
+  const axis = (top) => {
+    const tick = (t) => '<line class="grid" x1="' + X(t) + '%" y1="' + (top ? 24 : 0) + '" x2="' + X(t) + '%" y2="'
+      + (top ? '100%' : 6) + '"/>' + (t % step ? '' : '<text class="tick" x="' + X(t) + '%" y="' + (top ? 18 : 20)
+      + '">' + t + '</text>');
+    const button = ([s, label]) => '<button data-s="' + s + '"' + (s === SCALE ? ' class="on"' : '') + '>' + label
+      + '</button>';
+    const scale = '<span class="seg scale">' + [['fit', fit.join('–')], ['full', '0–' + of]].map(button).join('')
+      + '</span>';
+    return '<div class="sgr axis"><div class="lead">' + (top ? 'solved per run, of ' + of + ' tasks' + scale : '')
+      + '</div><div class="plot"><svg>' + ticks.map(tick).join('') + '</svg></div><div></div></div>';
+  };
+  const body = rows.map((r, i) => {
+    if (r.from) {
+      return '<div class="sgr grp"><div class="lead">made from ' + esc(r.from.c.name) + (r.id ? ' on '
+        + roundDay(r.id) : '') + '</div>' + plot(i, '') + '<div></div></div>';
+    }
+    const row = r.live ? teacherRow(r.live, X(r.parent.x)) : harnessRow(r.n, X, root);
+    return '<div class="sgr h"><div class="vt">' + row.area + '</div><div>' + row.left + '</div>' + plot(i, row.own)
+      + '<div class="nums">' + row.right + '</div></div>';
+  });
+  return '<section class="panel"><div class="sgbox"><div class="sg">' + axis(true) + body.join('') + axis(false)
+    + '</div></div><p class="sub">Big dots are the mean of a harness\'s runs on the probe set, and small dots are '
+    + 'single runs. Green is better than the parent and red is worse, beyond noise. Blue lines lead to the variants '
+    + 'promoted to parent. Hover a file to see its diff, or click it to open the whole file.</p></section>';
+}
+function harnessRow(n, X, root) {
+  const c = n.c, y = '50%', xs = n.runs.map((r) => r.resolved), xp = n.parent ? X(n.parent.x) : 0;
+  const tips = n.runs.map((r) => addTip('<div class="tt">' + esc(r.label) + '</div><div><b>' + r.resolved + '</b>/'
+    + r.total + ' solved · click to open this run</div>'));
+  const xk = n.x == null ? xp : X(n.x);
+  let own = n.parent ? branch(xp, xk, (n.kids.length ? ' on' : '') + (n.x == null ? ' wait' : '')) : '';
+  if (n.x == null) own += '<circle class="pt wait" cx="' + xp + '%" cy="' + y + '" r="5"/>';
+  else {
+    const st = c.standing;
+    const dot = !n.parent ? ' root' : st && st.better_by ? ' better' : st && st.solves.z <= -2 ? ' worse' : '';
+    if (xs.length > 1) {
+      own += '<line class="whisk" x1="' + X(Math.min(...xs)) + '%" y1="' + y + '" x2="' + X(Math.max(...xs)) + '%" y2="'
+        + y + '"/>' + n.runs.map((r, k) => '<a href="#node/' + enc(r.name) + '" data-tip="' + tips[k] + '">'
+        + '<circle class="one" cx="' + X(r.resolved) + '%" cy="' + y + '" r="3.5"/></a>').join('');
+    }
+    own += '<a href="' + esc(c.href) + '" data-tip="' + addTip(harnessTip(n, root)) + '"><circle class="pt' + dot
+      + (n.parent && n.kids.length ? ' on' : '') + '" cx="' + X(n.x) + '%" cy="' + y + '" r="6.5"/></a>';
+  }
+  const files = c.changed ? '<div class="files"><span class="k">Code change:</span>' + filesHtml(c) + '</div>' : '';
+  return {
+    area: areaTag(c.area, c.ports),
+    left: '<div class="kv"><div><span class="k">Title:</span> <a href="' + esc(c.href) + '">' + esc(c.title)
+      + '</a></div><div><span class="k">ID:</span> <span class="id">' + esc(c.name) + '</span></div>' + files
+      + '</div>',
+    own,
+    right: n.x == null ? '<span class="m">' + esc(waiting(c)) + '</span>' : scoresHtml(n, tips),
+  };
+}
+function filesHtml(c) {
+  return changes(c.changed).map((f) => {
+    if (f.text) return '<span class="m">' + esc(f.text) + '</span>';
+    const what = f.op === '+' ? '<i class="a">new</i>' : f.op === '-' ? '<i class="d">deleted</i>'
+      : '<i><span class="a">+' + f.added + '</span> <span class="d">−' + f.removed + '</span></i>';
+    return '<button type="button" class="file" data-v="' + esc(c.name) + '" data-file="' + esc(f.path) + '">'
+      + esc(f.path) + what + '</button>';
+  }).join('');
+}
+// "37/51 + 36/51 = 36.5/51", then how it compares to its parent
+function scoresHtml(n, tips) {
+  const c = n.c, st = c.standing, of = n.runs[0].total;
+  const each = n.runs.map((r, k) => '<a href="#node/' + enc(r.name) + '" data-tip="' + tips[k] + '">' + r.resolved + '/'
+    + of + '</a>');
+  const sum = each.length > 1 ? each.join(' + ') + ' =&nbsp;<b>' + num(n.x) + '/' + of + '</b>'
+    : '<b>' + each[0] + '</b>';
+  let h = '<div>' + sum + '</div>';
+  c.runs.filter((r) => !r.total).forEach((r) => {
+    h += '<div class="m">' + esc(r.label.split(' ').pop()) + ': ' + esc(runWhat(r)) + '</div>';
+  });
+  if (st) {
+    const tone = (z) => (z >= 2 ? 'good' : z <= -2 ? 'bad' : '');
+    const line = (label, z, value) => '<div>' + label + ': <span class="' + tone(z) + '">' + value + '</span></div>';
+    h += line('compared to parent', st.solves.z, signed(st.solves.gain, 1))
+      + line('token usage', st.tokens.z, signedPct(st.tokens.change));
+    if (st.problems.length) h += '<div class="bad">runs made differently</div>';
+    if (st.broke) h += '<div class="bad">broke the contract on ' + st.broke + ' task runs</div>';
+  }
+  return h;
+}
+function harnessTip(n, root) {
+  const c = n.c, st = c.standing, p = c.profile;
+  const each = n.runs.map((r) => esc(r.label.split(' ').pop()) + ': <b>' + r.resolved + '</b>/' + r.total).join(' · ');
+  let h = '<div class="tt">' + esc(c.title) + '</div><div class="tm">' + esc(c.name)
+    + (c.area ? ' · ' + esc(c.area) : '') + '</div><div>' + each + '</div><div>' + num(n.x) + ' solved per run'
+    + (n.parent ? ', ' + signed(n.x - root.x, 1) + ' vs the baseline' : '') + '</div>';
+  if (st) {
+    const noise = st.tokens.z >= 2 ? 'fewer beyond noise' : st.tokens.z <= -2 ? 'more beyond noise' : 'within noise';
+    h += '<div>vs its parent ' + signed(st.solves.gain, 1) + ' ± ' + st.solves.se.toFixed(1) + ' solved per run ('
+      + esc(st.solves.verdict) + ')' + (st.hidden ? ', hidden tasks ' + signed(st.hidden.gain, 1) : '') + '</div>'
+      + '<div>tokens ' + signedPct(st.tokens.change) + ' vs its parent (' + noise + ')</div>';
+    if (st.problems.length) h += '<div class="bad">runs made differently: ' + esc(st.problems.join('; ')) + '</div>';
+    if (st.broke) h += '<div class="bad">broke the contract on ' + st.broke + ' task runs</div>';
+    if (st.better_by) h += '<div class="good">better than its parent on ' + esc(st.better_by) + '</div>';
+  }
+  if (p) {
+    h += '<div class="m">' + p.minutes.toFixed(1) + ' min/task · ' + fmtTok(p.output_tokens) + ' tokens/task'
+      + (c.acted ? ' · ' + esc(c.acted) : '') + '</div>';
+  }
+  return h + (n.parent && n.kids.length ? '<div>promoted: ' + n.kids.length + ' variants made from it</div>' : '');
+}
+function teacherRow(round, xp) {
+  const s = round.sessions.find((x) => x.status === 'running') || round.sessions[round.sessions.length - 1];
+  const href = '#node/' + enc(round.node) + '/gen/' + enc(round.id) + '/' + (s ? s.n : 1);
+  return {
+    area: areaTag(s?.area ?? '', []),
+    left: '<div class="kv"><div><span class="k">Title:</span> <a href="' + href + '">The teacher is writing '
+      + 'variants</a></div><div><span class="k">Session:</span> ' + (s ? s.n : 1) + '</div></div>',
+    own: branch(xp, xp, ' wait') + '<circle class="pt wait live" cx="' + xp + '%" cy="50%" r="5"/>',
+    right: '<span class="m">' + round.registered + ' made so far</span>',
+  };
+}
+
+// a variant's diff, one file at a time: a preview on hover, all of it on click
+const DIFFS = new Map();
+let TIP_EL = null, MOUSE = { x: 0, y: 0 }, DIFF_OPENED = 0;
+// a unified diff's lines for each file, without the --- and +++ lines
+function diffFiles(text) {
+  const files = new Map(), lines = text.split('\n');
+  let cur = null;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('--- ') && lines[i + 1]?.startsWith('+++ ')) {
+      const to = lines[i + 1].slice(4);
+      files.set((to === '/dev/null' ? lines[i].slice(4) : to).replace(/^[ab]\//, ''), (cur = []));
+      i += 1;
+    } else if (cur) cur.push(lines[i]);
+  }
+  return files;
+}
+function fileDiff(variant, path) {
+  if (!DIFFS.has(variant)) {
+    const loading = api('/api/variant?name=' + enc(variant)).then((v) => diffFiles(v.diff));
+    loading.catch(() => DIFFS.delete(variant));
+    DIFFS.set(variant, loading);
+  }
+  return DIFFS.get(variant).then((files) => files.get(path) ?? []);
+}
+const lineCounts = (lines) => '+' + lines.filter((l) => l.startsWith('+')).length + ' −'
+  + lines.filter((l) => l.startsWith('-')).length;
+function filePreview(path, lines) {
+  const more = lines.length - 24;
+  if (!lines.length) return '<div class="path">' + esc(path) + '</div><div class="m">No diff for this file</div>';
+  return '<div class="path">' + esc(path) + ' <span class="m">' + lineCounts(lines) + '</span></div>'
+    + diffHtml(lines.slice(0, 24).join('\n')) + '<div class="m">' + (more > 0 ? more + ' more lines · ' : '')
+    + 'click to open</div>';
+}
+async function openDiff(variant, path) {
+  const dlg = $('#dlg'), opened = ++DIFF_OPENED;
+  dlg.innerHTML = '<div class="in"><div class="hd"><div><div class="path">' + esc(path) + '</div><div class="m">'
+    + esc(variant) + '</div></div><button type="button" class="x" aria-label="Close">×</button></div><div class="bd">'
+    + '<div class="empty">Loading…</div></div></div>';
+  dlg.showModal();
+  let body;
+  try {
+    const lines = await fileDiff(variant, path);
+    body = lines.length ? diffHtml(lines.join('\n')) : '<div class="empty">No diff for this file</div>';
+    if (opened === DIFF_OPENED) dlg.querySelector('.hd .m').textContent = variant + ' · ' + lineCounts(lines);
+  } catch (e) {
+    body = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+  if (opened === DIFF_OPENED) dlg.querySelector('.bd').innerHTML = body;
+}
+$('#dlg').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget || e.target.closest('.x')) e.currentTarget.close();
+});
+
+function hideTip() {
+  TIP_EL = null;
+  $('#tip').style.display = 'none';
+}
+function placeTip() {
+  const tip = $('#tip');
+  if (tip.style.display !== 'block') return;
+  const below = MOUSE.y + 16 + tip.offsetHeight < innerHeight;
+  tip.style.left = Math.max(8, Math.min(MOUSE.x + 14, innerWidth - tip.offsetWidth - 8)) + 'px';
+  tip.style.top = Math.max(8, below ? MOUSE.y + 16 : MOUSE.y - tip.offsetHeight - 12) + 'px';
+}
+document.addEventListener('mouseover', (e) => {
+  const el = e.target.closest?.('[data-tip], .file');
+  if (el === TIP_EL) return;
+  if (!el) {
+    hideTip();
+    return;
+  }
+  TIP_EL = el;
+  const tip = $('#tip'), file = el.classList.contains('file');
+  tip.classList.toggle('wide', file);
+  tip.style.display = 'block';
+  tip.innerHTML = file ? '<div class="m">Loading the diff…</div>' : (TIPS[+el.getAttribute('data-tip')] ?? '');
+  placeTip();
+  if (!file) return;
+  fileDiff(el.dataset.v, el.dataset.file).then((lines) => {
+    if (TIP_EL !== el) return;
+    tip.innerHTML = filePreview(el.dataset.file, lines);
+    placeTip();
+  }, (err) => {
+    if (TIP_EL === el) tip.innerHTML = '<div class="m">' + esc(err.message) + '</div>';
+  });
+});
+document.addEventListener('mousemove', (e) => {
+  MOUSE = { x: e.clientX, y: e.clientY };
+  placeTip();
+});
 function harnessItem(c) {
   const kids = c.children.map((k) => '<li>' + harnessItem(k) + '</li>');
   c.teacher.forEach((r) => kids.push('<li>' + teacherCard(r) + '</li>'));
@@ -629,6 +1001,26 @@ function taskRows(n) {
   }).join('');
 }
 $('#main').addEventListener('click', (e) => {
+  const file = e.target.closest('.file');
+  if (file) {
+    hideTip();
+    openDiff(file.dataset.v, file.dataset.file);
+    return;
+  }
+  const view = e.target.closest('.home-view button');
+  if (view) {
+    HOME = view.dataset.v;
+    store('rsi-home', HOME);
+    renderTree();
+    return;
+  }
+  const scale = e.target.closest('.scale button');
+  if (scale) {
+    SCALE = scale.dataset.s;
+    store('rsi-scale', SCALE);
+    renderTree();
+    return;
+  }
   const f = e.target.closest('#filter button');
   if (f) {
     FILTER = f.dataset.f;

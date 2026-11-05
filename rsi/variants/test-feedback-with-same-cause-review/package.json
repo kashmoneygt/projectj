@@ -1,0 +1,17 @@
+{
+  "name": "@projectj/pi-test-feedback-with-same-cause-review",
+  "version": "0.1.0",
+  "description": "Evidence system prompt, thinking cap and finish review of the parent; bash test runs piped through a filter get back the verdict and failing tests the filter cut, and test labels that name no module are explained; the finish review also probes other inputs that reach the same cause as the task's example",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "extensions/*.ts"
+    ],
+    "skills": [
+      "skills/*"
+    ]
+  }
+}

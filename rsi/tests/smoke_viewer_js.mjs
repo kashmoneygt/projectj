@@ -46,6 +46,7 @@ const sandbox = {
     addEventListener() {},
     document: {
         hidden: false,
+        body: new El(),
         querySelector: (sel) => (sel.startsWith("#") ? (els[sel] ??= new El()) : null),
         querySelectorAll: () => [],
         getElementById: (id) => (id === "saved" && data ? { textContent: data } : null),
@@ -73,7 +74,8 @@ const render = (what, data, code, marker) => {
     checked += 1;
 };
 const tree = await get("/api/tree");
-render("the tree", tree, "DATA = __data; renderTree()", 'class="node');
+render("the tree as a graph", tree, "HOME = 'graph'; DATA = __data; renderTree()", 'class="sg"');
+render("the tree as cards", tree, "HOME = 'cards'; DATA = __data; renderTree()", 'class="node');
 render("tasks across runs", await get("/api/flips"), "DATA = __data; renderFlips()", "<");
 const cards = [];
 const walk = (card) => {
@@ -81,6 +83,17 @@ const walk = (card) => {
     card.children.forEach(walk);
 };
 tree.lineages.forEach((lineage) => walk(lineage.tree));
+// each file the graph lists for a variant has its own part of the diff shown on hover
+for (const card of cards.filter((c) => c.changed)) {
+    sandbox.__name = card.name;
+    sandbox.__changed = card.changed;
+    const listed = vm.runInContext("changes(__changed).filter((f) => f.path).map((f) => f.path)", sandbox);
+    const found = await vm.runInContext("Promise.all(changes(__changed).filter((f) => f.path).map((f) => "
+        + "fileDiff(__name, f.path).then((lines) => lines.length)))", sandbox);
+    const missing = listed.filter((_, k) => !found[k]);
+    if (!listed.length || missing.length) throw new Error(`${card.name}: no diff for ${missing.join(", ") || "any file"}`);
+    checked += 1;
+}
 for (const card of cards) {
     if (!card.runs.length) {
         const variant = await get(`/api/variant?name=${encodeURIComponent(card.name)}`);

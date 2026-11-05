@@ -53,6 +53,7 @@ def test_parse_takes_a_card_in_any_shape() -> None:
     loose = cards.parse(text="Verify before finishing\n\nRuns settle unverified, so check first.\n")
     assert (loose.title, loose.hypothesis) == ("Verify before finishing", "Runs settle unverified, so check first.")
     assert len(cards.parse(text=f"{'word ' * 40}\n").title) == cards.TITLE_MAX
+    assert cards.parse(text=f"{'word ' * 40}\n", title_max=None).title == ("word " * 40).strip()
 
 
 def test_check_and_read(tmp_path) -> None:
