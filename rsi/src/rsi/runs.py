@@ -97,14 +97,29 @@ def write_probe(root: core.Node, nodes: list[core.Node]) -> list[str]:
     probe = failures + successes
     hidden = sorted(pick.sample(failures, len(failures) // 2) + pick.sample(successes, len(successes) // 2))
     left_out = [iid for iid in failed if iid in skipped]
-    header = f"# probe set of the lineage rooted at {root.name}: {len(probe)} tasks (seed {root.seed})\n"
-    if left_out:
-        header += f"# left out, failed in {NEVER_SOLVED_TRIES}+ runs and never solved: {', '.join(left_out)}\n"
+    note = f"# left out, failed in {NEVER_SOLVED_TRIES}+ runs and never solved: {', '.join(left_out)}\n"
+    _write_probe_lists(root=root, probe=probe, hidden=hidden, note=note if left_out else "")
+    return probe
+
+
+def carry_probe(root: core.Node, probe: list[str], hidden: list[str]) -> list[str]:
+    """Write a probe set picked elsewhere, like another lineage's, with the tasks it hides from the teacher"""
+    missing = [iid for iid in probe if iid not in root.runs]
+    if missing:
+        raise ValueError(f"{root.name} didn't run {len(missing)} of these tasks: {', '.join(missing[:5])}")
+    stray = sorted(set(hidden) - set(probe))
+    if stray:
+        raise ValueError(f"hidden tasks that aren't in the probe set: {', '.join(stray[:5])}")
+    _write_probe_lists(root=root, probe=probe, hidden=sorted(hidden), note="# picked before this lineage started\n")
+    return probe
+
+
+def _write_probe_lists(root: core.Node, probe: list[str], hidden: list[str], note: str) -> None:
+    header = f"# probe set of the lineage rooted at {root.name}: {len(probe)} tasks (seed {root.seed})\n{note}"
     # hidden half first, so a crash can't leave a probe set without one
     hidden_header = f"# hidden from the teacher: {len(hidden)} tasks of {root.name}'s probe set (seed {root.seed})\n"
     _atomic_write(path=hidden_path(root=root), text=hidden_header + "\n".join(hidden) + "\n")
     _atomic_write(path=probe_path(root=root), text=header + "\n".join(probe) + "\n")
-    return probe
 
 
 def never_solved(model: str, dataset: str, nodes: list[core.Node]) -> set[str]:

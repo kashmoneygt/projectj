@@ -4,9 +4,10 @@ import shutil
 import signal
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
-from rsi import folders, paths, teacher
+from rsi import folders, paths, teacher, views
 
 COPILOT = os.environ.get("RSI_COPILOT_BIN", "copilot")
 container_mcp = folders.module(root=paths.teachers_dir(), name="copilot", file="container_mcp.py", kind="MCP server")
@@ -16,6 +17,8 @@ MCP_TIMEOUT_MS = 3_700_000  # a container command may take an hour (Copilot's de
 # a separate Copilot home, so the user's history, skills, plugins and MCP servers stay out (only the login is borrowed)
 HOME = Path(os.environ.get("RSI_TEACHER_HOME", str(Path.home() / ".cache" / "rsi" / "copilot")))
 CLIP_CHARS = 6_000  # per tool call and result in the transcript
+# the kind of tool each container tool is, by the names the viewer knows (Copilot names them <server>-<tool>)
+_KINDS = {"bash": "bash", "read_file": "read", "write_file": "write", "edit_file": "edit"}
 
 
 class CopilotTeacher:
@@ -120,6 +123,69 @@ class CopilotTeacher:
                 lines += ["(the conversation was compacted to fit the context window)", ""]
         return "\n".join(lines) + "\n"
 
+    def trajectory(self, *, session_dir: Path) -> views.Trajectory:
+        view = views.Trajectory()
+        start: float | None = None
+        calls: dict[str, views.Call] = {}
+        started: dict[str, float] = {}
+        thinking: list[str] = []
+        for event in _events(path=session_dir / "events.jsonl"):
+            kind, data = event.get("type"), event.get("data") or {}
+            t = _epoch_ms(stamp=event.get("timestamp"))
+            start = start or t
+            if kind == "user.message" and not view.user:
+                view.user = str(data.get("content") or "")
+            elif kind == "assistant.turn_start":
+                view.inflight_at = t
+            elif kind == "assistant.reasoning":
+                thinking.append(str(data.get("content") or ""))
+            elif kind == "assistant.message":
+                view.inflight_at = None
+                requests = data.get("toolRequests") or []
+                step = views.step(
+                    t=t - start,
+                    ms=None,
+                    thinking="\n".join(thinking),
+                    text=str(data.get("content") or ""),
+                    calls=[_call(request=request) for request in requests],
+                    stop="toolUse" if requests else "stop",
+                    out_tokens=None,
+                    error=None,
+                )
+                thinking = []
+                calls.update({call.id: call for call in step.calls})
+                view.items.append(step)
+            elif kind == "tool.execution_start":
+                started[str(data.get("toolCallId", ""))] = t
+            elif kind == "tool.execution_complete":
+                call = calls.get(str(data.get("toolCallId", "")))
+                if call is not None:
+                    error = (data.get("error") or {}).get("message")
+                    out = str((data.get("result") or {}).get("content") or error or "")
+                    since = started.get(call.id)
+                    call.ended(
+                        out=out, ok=bool(data.get("success")), ms=round(t - since) if since is not None else None
+                    )
+            elif kind == "session.compaction_start":
+                view.items.append(views.Note(text="context compacted"))
+        return view
+
+
+def _call(request: dict) -> views.Call:
+    name = str(request.get("name") or "?")
+    kind = _KINDS.get(name.partition("-")[2], name)
+    args = request.get("arguments")
+    if kind == "edit" and isinstance(args, dict):
+        args = {"path": args.get("path"), "edits": [{"old": args.get("old_text", ""), "new": args.get("new_text", "")}]}
+    return views.call(call_id=str(request.get("toolCallId") or ""), name=kind, args=args)
+
+
+def _epoch_ms(stamp: object) -> float:
+    try:
+        return datetime.fromisoformat(str(stamp)).timestamp() * 1000
+    except ValueError:
+        return time.time() * 1000
+
 
 def _keep_session_state(out_dir: Path, since: float) -> None:
     """Move Copilot's own session record (which has compactions) into out_dir"""
@@ -158,10 +224,13 @@ def _stop(process: subprocess.Popen) -> None:
 
 
 def _events(path: Path) -> list[dict]:
+    """The session's events, without the streamed pieces each whole message repeats"""
     if not path.is_file():
         return []
     out = []
     for line in path.read_text(errors="replace").splitlines():
+        if '_delta"' in line:
+            continue
         try:
             out.append(json.loads(line))
         except ValueError:

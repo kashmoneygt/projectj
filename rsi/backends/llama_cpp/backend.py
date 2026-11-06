@@ -53,7 +53,7 @@ def resolve_gguf(spec: core.ModelSpec) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / filename
     if not dest.exists():
-        log.info("downloading %s/%s ...", repo, filename)
+        log.info(f"downloading {repo}/{filename} ...")
         dest = Path(huggingface_hub.hf_hub_download(repo_id=repo, filename=filename, local_dir=str(dest_dir)))
     return dest
 

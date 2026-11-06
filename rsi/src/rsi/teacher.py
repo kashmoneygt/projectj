@@ -2,7 +2,7 @@ import dataclasses
 from pathlib import Path
 from typing import Protocol
 
-from rsi import folders, paths
+from rsi import folders, paths, views
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,6 +29,9 @@ class Teacher(Protocol):
 
     def transcript(self, *, session_dir: Path) -> str:
         """The session turn by turn, for people to read"""
+
+    def trajectory(self, *, session_dir: Path) -> views.Trajectory:
+        """The session as the viewer shows it, read again while it's going"""
 
 
 def load(name: str) -> Teacher:

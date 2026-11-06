@@ -40,6 +40,7 @@ def test_by_ids(monkeypatch) -> None:
     picked = mod.BENCHMARK.by_ids(ids=["c__d-2", "a__b-1"])
     assert [i.instance_id for i in picked] == ["c__d-2", "a__b-1"]
     assert picked[0].base_commit == "c2"
+    assert picked[0].task == "Please resolve this issue:\n\np2"
     with pytest.raises(ValueError, match="x__y-9"):
         mod.BENCHMARK.by_ids(ids=["x__y-9"])
 
@@ -49,7 +50,7 @@ def test_command_args(tmp_path: Path, monkeypatch) -> None:
     repo = _tasks_repo(root=tmp_path)
     calls: list[list[str]] = []
     monkeypatch.setattr(mod, "run_sb", lambda args, cwd: calls.append(args))
-    instance = core.Instance(instance_id="django__django-1", repo="r", base_commit="c", problem_statement="p")
+    instance = core.Instance(instance_id="django__django-1", repo="r", base_commit="c", task="p")
 
     mod.BENCHMARK.build_images(instances=[instance], workers=2, cwd=tmp_path)
     assert calls[-1] == ["images", "build", str(repo), "-d", "verified", "-j", "2", "-i", "django__django-1"]
@@ -131,3 +132,28 @@ def test_eval_builds_only_the_missing_images(monkeypatch) -> None:
     docker_build.build_instance_images(client=None, image_specs=[], force_rebuild=True, max_workers=2)
     assert calls == [{"force_rebuild": False, "max_workers": 2}]
     assert mod.SB_COMMAND[-1] == str(cli)
+
+
+def test_the_verdict_reads_the_graders_report_as_its_hidden_tests(tmp_path: Path) -> None:
+    eval_dir = tmp_path / "eval"
+    eval_dir.mkdir()
+    tests = {
+        "FAIL_TO_PASS": {"success": ["pkg/test_a.py::t0"], "failure": ["pkg/test_a.py::t1"]},
+        "PASS_TO_PASS": {"success": ["pkg/test_b.py::t2"], "failure": []},
+    }
+    report = {"t__x-1": {"resolved": False, "patch_successfully_applied": True, "tests_status": tests}}
+    (eval_dir / "report.json").write_text(json.dumps(report))
+    (eval_dir / "test_output.txt").write_text("FAILED pkg/test_a.py::t1\n= 1 failed, 430 passed =\nTest Exit Code: 1\n")
+    judged = mod.BENCHMARK.verdict(task_dir=tmp_path)
+    assert judged is not None and (judged.resolved, judged.applied, judged.infra) == (False, True, False)
+    fix, keep = judged.checks
+    assert (fix.label, fix.failing, fix.total, fix.passed, fix.failed) == (
+        "should pass after the fix (FAIL_TO_PASS)",
+        "still failing",
+        2,
+        1,
+        ["pkg/test_a.py::t1"],
+    )
+    assert (keep.failing, keep.total, keep.passed, keep.failed) == ("broken", 1, 1, [])
+    assert "FAILED pkg/test_a.py::t1" in judged.log and "Test Exit Code: 1" in judged.log
+    assert mod.BENCHMARK.verdict(task_dir=tmp_path / "nowhere") is None

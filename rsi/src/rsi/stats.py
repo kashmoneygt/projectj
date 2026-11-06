@@ -29,7 +29,7 @@ class Evidence:
         basis = _basis(
             variant_runs=self.variant_runs, reference_runs=self.reference_runs, reference=reference, tasks=self.tasks
         )
-        return f"{self.gain:+.1f} ± {self.se:.1f} tasks per run (z {self.z:.2f}; {basis})"
+        return f"{self.gain:+.1f} ± {self.se:.1f} tasks per run, {verdict(z=self.z)} ({basis})"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -50,7 +50,7 @@ class TokenEvidence:
         basis = _basis(
             variant_runs=self.variant_runs, reference_runs=self.reference_runs, reference=reference, tasks=self.tasks
         )
-        return f"tokens per task {math.exp(-self.saving) - 1:+.0%} ± {self.se:.0%} (z {self.z:.2f}; {basis})"
+        return f"tokens per task {math.exp(-self.saving) - 1:+.0%} ± {self.se:.0%}, {verdict(z=self.z)} ({basis})"
 
 
 def evidence(variant: list[core.Node], reference: list[core.Node], tasks: list[str]) -> Evidence:

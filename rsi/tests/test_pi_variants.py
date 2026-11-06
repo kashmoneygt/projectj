@@ -1,6 +1,9 @@
+import ast
+import io
 import json
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 import requests
@@ -15,7 +18,7 @@ def _package(tmp_path: Path) -> Path:
     (package / "extensions").mkdir(parents=True)
     (package / "package.json").write_text((pi.HARNESS.package_dir / "package.json").read_text())
     (package / "extensions" / "notes.ts").write_text("export default function notes(pi) {}\n")
-    (package / "VARIANT.md").write_text("# card\nhypothesis: h\n")
+    (package / "VARIANT.md").write_text("card\nWhat: w\n")
     return package
 
 
@@ -40,7 +43,6 @@ def test_check_accepts_the_baseline_shape(tmp_path) -> None:
                 "compaction": {"enabled": True, "reserveTokens": 20000},
                 "branchSummary": {"skipPrompt": True},
                 "retry": {"maxRetries": 5, "provider": {"timeoutMs": 600000}},
-                "thinkingBudgets": {"medium": 6000},
                 "steeringMode": "all",
                 "shellCommandPrefix": "set -o pipefail;",
                 "hideThinkingBlock": True,
@@ -48,6 +50,17 @@ def test_check_accepts_the_baseline_shape(tmp_path) -> None:
         )
     )
     assert pi.check.static_problems(package=package) == []
+
+
+def test_check_reports_a_changed_manifest(tmp_path) -> None:
+    package = _package(tmp_path=tmp_path)
+    baseline = pi.HARNESS.package_dir / "package.json"
+    assert pi.check.static_problems(package=package, manifest=baseline) == []
+    manifest = json.loads(baseline.read_text())
+    (package / "package.json").write_text(json.dumps({**manifest, "name": "@projectj/pi-my-variant"}, indent=2) + "\n")
+    assert pi.check.static_problems(package=package, manifest=baseline) == [
+        "package.json differs from the baseline's; leave it unchanged and say what changed in VARIANT.md"
+    ]
 
 
 def test_check_reports_files_that_never_reach_the_agent(tmp_path) -> None:
@@ -136,7 +149,10 @@ def test_check_rejects_changes_to_the_model_contract(tmp_path) -> None:
     assert any("changes the model or its thinking level" in p for p in problems)
     assert any("touches the evaluation instrumentation" in p for p in problems)
     assert any("settings.json sets defaultThinkingLevel" in p for p in problems)
-    assert not any("compaction" in p or "thinkingBudgets" in p for p in problems)
+    assert "settings.json sets thinkingBudgets, which caps how much the model thinks, which is set with the model" in (
+        problems
+    )
+    assert not any("compaction" in p for p in problems)
 
 
 def test_check_takes_only_settings_about_how_the_agent_works(tmp_path) -> None:
@@ -239,11 +255,11 @@ def test_transcript_renders_the_task_then_each_turn(tmp_path) -> None:
             },
         ],
     )
-    text = pi.transcript(events=events)
+    text = pi.events.transcript(events=events)
     glimpse = text.split("\n\n", 1)[0]
     assert glimpse.startswith("task: The parser drops trailing commas. The parser")
-    assert len(glimpse) == len("task: ") + pi.TASK_GLIMPSE_CHARS and glimpse.endswith("…")
-    assert pi.transcript(events=events, full=True).startswith(f"## task message\n{task.strip()}\n")
+    assert len(glimpse) == len("task: ") + pi.events.TASK_GLIMPSE_CHARS and glimpse.endswith("…")
+    assert pi.events.transcript(events=events, full=True).startswith(f"## task message\n{task.strip()}\n")
     assert "[1] 1.2k tok out" in text
     assert "thinking (900 tok): I should look at the parser first." in text
     assert "bash: pytest -q (+1 lines) → error: collected 3 E AssertionError 1 failed" in text
@@ -252,7 +268,7 @@ def test_transcript_renders_the_task_then_each_turn(tmp_path) -> None:
     assert "[user message: Budget notice]" in text
     assert "[settle-guard message: Take one concrete step.]" in text
     assert "[2] 16.4k tok out, stop length (cut at the output cap)" in text
-    assert pi.transcript(events=tmp_path / "missing.jsonl") == "(no model output)\n"
+    assert pi.events.transcript(events=tmp_path / "missing.jsonl") == "(no model output)\n"
 
 
 def test_transcript_elides_the_middle_of_long_runs(tmp_path) -> None:
@@ -274,7 +290,7 @@ def test_transcript_elides_the_middle_of_long_runs(tmp_path) -> None:
         records.append({"type": "tool_execution_end", "toolCallId": f"c{i}", "isError": i % 2 == 0, "result": {}})
     events = tmp_path / "events.jsonl"
     _write_events(path=events, records=records)
-    text = pi.transcript(events=events, max_chars=1500)
+    text = pi.events.transcript(events=events, max_chars=1500)
     assert len(text) < 1700
     assert "[1] 10 tok out" in text and "[60] 10 tok out" in text
     assert "entries omitted (tool calls: bash" in text and "[10] 10 tok out" not in text
@@ -291,46 +307,32 @@ def test_contract_violations(tmp_path) -> None:
         chat_template_kwargs={"enable_thinking": True, "reasoning_effort": "xhigh"},
     )
     kwargs = {"enable_thinking": True, "reasoning_effort": "xhigh"}
-    metrics = tmp_path / "metrics.jsonl"
     requests = tmp_path / "requests.jsonl"
-    lines = [
-        {
-            "ts": 1,
-            "params": {
-                "model": "qwen",
-                "stream": True,
-                "stream_options": {"include_usage": True},
-                "store": False,
-                "max_completion_tokens": 600,
-                "temperature": 1,
-                "top_p": 0.95,
-                "chat_template_kwargs": kwargs,
-            },
-        },
-        {
-            "ts": 2,
-            "params": {
-                "model": "qwen",
-                "max_tokens": 90,
-                "temperature": 1,
-                "top_p": 0.95,
-                "chat_template_kwargs": kwargs,
-            },
-        },
-        {"type": "timing", "ts": 3},
-        {"ts": 4, "system_tokens": 10},
+    chat = {
+        "model": "qwen",
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "store": False,
+        "max_completion_tokens": 600,
+        "temperature": 1,
+        "top_p": 0.95,
+        "chat_template_kwargs": kwargs,
+    }
+    params = [
+        chat,
+        {"model": "qwen", "max_tokens": 90, "temperature": 1, "top_p": 0.95, "chat_template_kwargs": kwargs},
     ]
-    metrics.write_text("".join(json.dumps(line) + "\n" for line in lines))
-    assert pi.contract_violations(requests=requests, metrics=metrics, model=model) == []
+
+    def logged() -> Path:
+        lines = [{"ip": "a", "method": "POST", "path": "/v1/chat/completions", "params": p} for p in params]
+        requests.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        return requests
+
+    assert pi.events.contract_violations(requests=logged(), model=model) == []
     low = {**kwargs, "reasoning_effort": "low"}
-    lines.append(
-        {"ts": 5, "params": {"model": "other", "max_tokens": 900, "temperature": 0.7, "chat_template_kwargs": low}}
-    )
-    lines.append(
-        {"ts": 6, "params": {**lines[0]["params"], "seed": 7, "max_tokens": 10, "max_completion_tokens": 5000}}
-    )
-    metrics.write_text("".join(json.dumps(line) + "\n" for line in lines))
-    assert pi.contract_violations(requests=requests, metrics=metrics, model=model) == [
+    params.append({"model": "other", "max_tokens": 900, "temperature": 0.7, "chat_template_kwargs": low})
+    params.append({**chat, "seed": 7, "max_tokens": 10, "max_completion_tokens": 5000})
+    assert pi.events.contract_violations(requests=logged(), model=model) == [
         "chat_template_kwargs {'enable_thinking': True, 'reasoning_effort': 'low'}",
         "model other",
         "output cap 5000 > 600",
@@ -338,6 +340,7 @@ def test_contract_violations(tmp_path) -> None:
         "sampling {'temperature': 0.7}",
         "unexpected key seed",
     ]
+    assert pi.events.contract_violations(requests=tmp_path / "missing.jsonl", model=model) == []
 
 
 def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path) -> None:
@@ -349,7 +352,6 @@ def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path) 
         ctx=1000,
         sampling={"temperature": 1.0, "top_p": 0.95},
         chat_template_kwargs=kwargs,
-        thinking_budget_field="thinking_token_budget",
     )
     chat = {
         "model": "qwen",
@@ -360,7 +362,6 @@ def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path) 
         "temperature": 1,
         "top_p": 0.95,
         "chat_template_kwargs": kwargs,
-        "thinking_token_budget": 6000,
     }
     lines = [
         {"ip": "a", "method": "POST", "path": "/v1/chat/completions", "params": chat},
@@ -368,10 +369,8 @@ def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path) 
         {"ip": "a", "method": "POST", "path": "/tokenize", "params": {"content": "(5000 bytes)"}},
     ]
     requests = tmp_path / "requests.jsonl"
-    metrics = tmp_path / "metrics.jsonl"
-    metrics.write_text(json.dumps({"params": {"model": "other"}}) + "\n")
     requests.write_text("".join(json.dumps(line) + "\n" for line in lines))
-    assert pi.contract_violations(requests=requests, metrics=metrics, model=model) == []
+    assert pi.events.contract_violations(requests=requests, model=model) == []
     no_top_p = {key: value for key, value in chat.items() if key != "top_p"}
     lines += [
         {
@@ -381,16 +380,18 @@ def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path) 
             "params": {**chat, "temperature": 0.2, "seed": 7},
         },
         {"ip": "a", "method": "POST", "path": "/v1/chat/completions", "params": no_top_p},
+        {"ip": "a", "method": "POST", "path": "/v1/chat/completions", "params": {**chat, "thinking_token_budget": 60}},
         {"ip": "a", "method": "POST", "path": "/v1/completions?x=1", "params": {"prompt": "(9000 bytes)"}},
         {"ip": "a", "method": "POST", "path": "/v1/chat/completions", "unread": "chunked body"},
         {"ip": "a", "unread": "read_requests: ValueError: not enough values to unpack"},
     ]
     requests.write_text("".join(json.dumps(line) + "\n" for line in lines))
-    assert pi.contract_violations(requests=requests, metrics=metrics, model=model) == [
+    assert pi.events.contract_violations(requests=requests, model=model) == [
         "request to /v1/completions",
         "sampling {'temperature': 0.2, 'top_p': 0.95}",
         "sampling {'temperature': 1}",
         "unexpected key seed",
+        "unexpected key thinking_token_budget",
         "unread /v1/chat/completions: chunked body",
         "unread traffic: read_requests: ValueError: not enough values to unpack",
     ]
@@ -403,8 +404,9 @@ def test_task_metrics_count_every_call_the_forwarder_saw(tmp_path) -> None:
         records=[{"type": "message_end", "message": {"role": "assistant", "usage": usage}}],
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
+    # the agent's own events don't count, since the forwarder sees every call
     m = pi.HARNESS.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
-    assert (m.requests, m.input_tokens, m.output_tokens) == (1, 500, 40)
+    assert (m.requests, m.input_tokens, m.output_tokens) == (0, 0, 0)
     chat = {"method": "POST", "path": "/v1/chat/completions", "params": {}}
     lines = [
         {"ip": "a", **chat},
@@ -477,8 +479,10 @@ def test_a_call_still_running_when_the_run_ended_shows_as_such(tmp_path) -> None
             {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "bash"},
         ],
     )
-    assert "bash: grep -r x / → still running when the run ended" in pi.transcript(events=tmp_path / "events.jsonl")
-    assert "→ still running when the run ended\n" in pi.transcript(events=tmp_path / "events.jsonl", full=True)
+    assert "bash: grep -r x / → still running when the run ended" in pi.events.transcript(
+        events=tmp_path / "events.jsonl"
+    )
+    assert "→ still running when the run ended\n" in pi.events.transcript(events=tmp_path / "events.jsonl", full=True)
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
     m = pi.HARNESS.task_metrics(instance_dir=tmp_path, model=model, seconds=600.0, patch="")
     assert (m.tool_ms, m.tool_stats["bash"].count) == (596_000, 1)
@@ -512,9 +516,11 @@ def test_full_transcript_keeps_every_turn_in_full(tmp_path) -> None:
             {"type": "message_end", "message": {"role": "assistant", "stopReason": "toolUse", "usage": {"output": 10}}}
         )
     _write_events(path=tmp_path / "events.jsonl", records=records)
-    text = pi.transcript(events=tmp_path / "events.jsonl", full=True)
+    text = pi.events.transcript(events=tmp_path / "events.jsonl", full=True)
     assert text.startswith("## task message\nFix the parser.\n\n## turn 1 · 5.0k tok out (thinking 4.8k)")
-    assert pi.transcript(events=tmp_path / "events.jsonl").startswith("task: Fix the parser.\n\n[1] 5.0k tok out")
+    assert pi.events.transcript(events=tmp_path / "events.jsonl").startswith(
+        "task: Fix the parser.\n\n[1] 5.0k tok out"
+    )
     assert thinking.strip() in text
     assert "### bash\n$ pytest -q tests/\n→ error\n" in text
     assert "characters omitted" in text and text.count("x") < 2_100
@@ -550,7 +556,7 @@ def test_check_rejects_workload_terms_in_agent_visible_files(tmp_path) -> None:
         "APPEND_SYSTEM.md names the workload or its protocol ('benchmark')",
         "extensions/done.ts names the workload or its protocol ('hidden tests')",
     ]
-    (package / "VARIANT.md").write_text("# Cut empty patches\nhypothesis: tuned on swebench benchmark failures\n")
+    (package / "VARIANT.md").write_text("cut empty patches\nWhy: tuned on swebench benchmark failures\n")
     assert pi.check.term_problems(package=package, terms=terms) == problems
 
 
@@ -568,3 +574,44 @@ def test_scripts_run_with_the_standard_library_alone() -> None:
             [sys.executable, "-S", str(script), "--help"], capture_output=True, text=True, check=False
         )
         assert done.returncode == 0, done.stderr
+    loaded = subprocess.run(
+        [sys.executable, "-S", "-c", f"import runpy; runpy.run_path({str(pi.FORWARDER_SCRIPT)!r})"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert loaded.returncode == 0, loaded.stderr
+
+
+def _newer_f_strings(source: str) -> list[int]:
+    """Lines with an f-string python 3.11 can't parse: one inside another with the same quotes, or a backslash in {}"""
+    outer: list[str] = []  # the quotes of the f-strings we're inside
+    found: list[int] = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.FSTRING_MIDDLE:
+            if len(outer) > 1 and "\\" in token.string:
+                found.append(token.start[0])
+            continue
+        if token.type in (tokenize.STRING, tokenize.FSTRING_START):
+            body = token.string.lstrip("rRbBuUfF")
+            quote = body[:3] if body[:3] in ('"""', "'''") else body[:1]
+            if outer and (
+                "\\" in token.string or (quote[0] == outer[-1][0] and (len(outer[-1]) == 1 or len(quote) == 3))
+            ):
+                found.append(token.start[0])
+            if token.type == tokenize.FSTRING_START:
+                outer.append(quote)
+        elif token.type == tokenize.FSTRING_END:
+            outer.pop()
+    return found
+
+
+def test_scripts_parse_on_the_containers_python() -> None:
+    # pi's image, which runs them in the containers, has python 3.11. Its parser rejects these, as tried in the image
+    rejected = ['f"{x["a"]}"', 'f"""{f"""{1}"""}"""', r'''f"{'\n'.join(x)}"''', r'''f"{f'a\n'}"''']
+    accepted = ["f\"{x['a']}\"", 'f"""{x["a"]}"""', r'''f"a\n{x}"''', "f\"{f'{x}'}\""]
+    assert [bool(_newer_f_strings(source=s)) for s in rejected + accepted] == [True] * 4 + [False] * 4
+    for script in (pi.CHECK_SCRIPT, pi.TRY_SCRIPT, pi.CARDS_SCRIPT, pi.FORWARDER_SCRIPT):
+        source = script.read_text()
+        ast.parse(source, filename=str(script), feature_version=(3, 11))
+        assert _newer_f_strings(source=source) == [], script.name

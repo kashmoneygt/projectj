@@ -500,11 +500,11 @@ function branch(xp, xk, cls) {
 const roundDay = (id) => new Date(+id.slice(0, 4), +id.slice(4, 6) - 1, +id.slice(6, 8))
   .toLocaleDateString([], { month: 'short', day: 'numeric' });
 // the kind of variant a teacher session was asked for, with that session's brief on hover
-function areaTag(area, ports) {
+function areaTag(area, reuses) {
   if (!area) return '';
   const tip = '<div class="tt">' + esc(area) + '</div><div class="m">The teacher\'s brief for this type of variant:'
     + '</div><div>' + esc(DATA.areas[area] ?? '') + '</div>'
-    + (ports.length ? '<div class="m">Reuses ideas from ' + esc(ports.join(', ')) + '</div>' : '');
+    + (reuses.length ? '<div class="m">Reuses ideas from ' + esc(reuses.join(', ')) + '</div>' : '');
   return '<span class="vtype" data-tip="' + addTip(tip) + '">' + esc(area) + '</span>';
 }
 // "~ a.ts (+1 -2), + b.json" as files, each new, deleted or with its lines added and removed
@@ -622,7 +622,7 @@ function harnessRow(n, X, root) {
   }
   const files = c.changed ? '<div class="files"><span class="k">Code change:</span>' + filesHtml(c) + '</div>' : '';
   return {
-    area: areaTag(c.area, c.ports),
+    area: areaTag(c.area, c.reuses),
     left: '<div class="kv"><div><span class="k">Title:</span> <a href="' + esc(c.href) + '">' + esc(c.title)
       + '</a></div><div><span class="k">ID:</span> <span class="id">' + esc(c.name) + '</span></div>' + files
       + '</div>',
@@ -921,8 +921,8 @@ function cardHtml(card, diff, heading) {
   const result = (card.result || []).length ? '<div class="field"><div class="k">result</div><div class="v">'
     + card.result.map(esc).join('<br>') + '</div></div>' : '';
   return '<section class="panel"><h2>' + esc(heading) + '</h2>' + result + f('note', card.note, 'note')
-    + f('hypothesis', card.hypothesis) + f('evidence', card.evidence) + f('predicts', card.predicts)
-    + f('reuses ideas from', (card.ports || []).join(', ')) + f('files changed', card.changed)
+    + f('what', card.what) + f('why', card.why) + f('expect', card.expect)
+    + f('reuses ideas from', (card.reuses || []).join(', ')) + f('files changed', card.changed)
     + (diff ? '<details><summary>Show the diff</summary>' + diffHtml(diff) + '</details>' : '') + '</section>';
 }
 function diffHtml(text) {
@@ -1299,7 +1299,7 @@ function trajHtml(d, key) {
       + '</div>';
     if (v.eval) h += evalHtml(v.eval);
   }
-  if (d.timing) h += telemetryHtml(d);
+  h += telemetryHtml(d);
   if (d.outcome) {
     const o = d.outcome;
     h += '<div class="verdict"><span class="dot ' + o.status + '"></span>'
@@ -1312,15 +1312,14 @@ function trajHtml(d, key) {
   return h + '</div>';
 }
 function evalHtml(ev) {
-  // the hidden tests, which should all pass with the patch
-  const row = (name, s) => '<tr><td>' + name + '</td><td>' + s.total + '</td><td class="'
-    + (s.passed < s.total ? 'bad' : 'good') + '">' + s.passed + '</td></tr>';
-  let h = ev.f2p.total + ev.p2p.total ? '<div class="blk"><table class="cmp"><tr><th>hidden tests</th><th>tests</th>'
-    + '<th>passed</th></tr>' + row('should pass after the fix (FAIL_TO_PASS)', ev.f2p)
-    + row('should keep passing (PASS_TO_PASS)', ev.p2p) + '</table></div>' : '';
-  const failed = [...ev.f2p.failed.map((t) => 'still failing: ' + t), ...ev.p2p.failed.map((t) => 'broken: ' + t)];
-  if (failed.length) h += blk('Failed tests', failed.join('\n'));
-  if (ev.log) h += blk('Test log', ev.log);
+  // the benchmark's own checks, which the agent never saw, in its groups and words
+  const row = (c) => '<tr><td>' + esc(c.label) + '</td><td>' + c.total + '</td><td class="'
+    + (c.passed < c.total ? 'bad' : 'good') + '">' + c.passed + '</td></tr>';
+  let h = ev.checks.some((c) => c.total) ? '<div class="blk"><table class="cmp"><tr><th>checks</th><th>total</th>'
+    + '<th>passed</th></tr>' + ev.checks.map(row).join('') + '</table></div>' : '';
+  const failed = ev.checks.flatMap((c) => c.failed.map((t) => c.failing + ': ' + t));
+  if (failed.length) h += blk('Failed checks', failed.join('\n'));
+  if (ev.log) h += blk('Grading log', ev.log);
   return h;
 }
 function telemetryHtml(d) {

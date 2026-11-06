@@ -21,12 +21,16 @@ uv run rsi models up qwen-3.8-27b
 
 # build the Docker images for 100 tasks (only needed once)
 uv run rsi images build --tasks 100 --clone-tasks
+# or choose the tasks yourself, like a set spread across the benchmark's repos, with --instances <file> here and in run
 
-# run the default pi harness (the baseline) on those 100 tasks and score it. takes about 9 hours
+# run the default pi harness (the baseline) on those 100 tasks and score it. takes about 6 hours
 uv run rsi run --model qwen-3.8-27b --benchmark swebench-verified --tasks 100
 
 # pick the probe set from that run: the tasks it failed plus 30 it passed, to catch regressions. the teacher never sees half of them
 uv run rsi probe --root qwen-3.8-27b--pi--swebench-verified--baseline--100t--s42
+# or carry a probe set over from an earlier lineage, with the tasks it hides: run the baseline on those tasks first
+# (--instances probe.txt --seed 41, so its name doesn't clash with the probe runs below)
+uv run rsi probe --root <that run> --tasks probe.txt --hidden hidden.txt
 
 # run the baseline on the probe set a couple of times, since results change from run to run
 uv run rsi run --model qwen-3.8-27b --benchmark swebench-verified --probe
@@ -35,7 +39,7 @@ uv run rsi run --model qwen-3.8-27b --benchmark swebench-verified --probe --seed
 # the teacher writes up to 4 variants from a run, one session after another (up to an hour each)
 uv run rsi variants generate --parent qwen-3.8-27b--pi--swebench-verified--baseline--100t--s42
 
-# run each variant on the probe set (about 5 hours each), then see how it did against its parent
+# run each variant on the probe set (3 to 4 hours each, two tasks at a time), then see how it did against its parent
 uv run rsi run --variant <name> --probe
 uv run rsi variants list
 ```
@@ -60,7 +64,7 @@ To compare an evolved harness with the baseline at the end, run both on new task
 ## How it works
 
 - **Variants**: each variant is a folder in `variants/<name>` with its pi package and a short card (`VARIANT.md`) saying what it changes and why. `variants/tree.json` lists every variant and the run it was made from. [CONTRACT.md](harnesses/CONTRACT.md) and [HARNESS.md](harnesses/pi/HARNESS.md) say what a variant can change. It can't change the model, its settings or how we measure runs
-- **Teacher**: each session gets [variant-generator.md](prompts/variant-generator.md) and one area of the harness from [areas.md](prompts/areas.md), and writes at most one variant. The teacher runs in Copilot CLI on the host machine, but its tools only work inside a Docker container with the parent's runs, pi's source code, and commands to check and try out a variant. That container has no internet access, so the teacher can't look up the tasks' real fixes
+- **Teacher**: each session gets [variant-generator.md](prompts/variant-generator.md) and one area of the harness from [areas.md](prompts/areas.md), and writes at most one variant. The teacher runs in Copilot CLI on the host machine, but its tools only work inside a Docker container with the parent's runs, pi's source code, and commands to check and try out a variant. That container has no internet access, so the teacher can't look up the tasks' real fixes. Before a variant is kept, the loop checks its files and asks the agent a question that needs no change. A variant that keeps the agent from simply answering, by making it go on or change files, is turned down
 - **Sandbox**: the agent runs in each task's Docker image and can only reach the model server, through a forwarder that logs every request. This stops the agent from downloading the real fix, and lets us check every request against the pinned model settings
 
 ## Plug-in support

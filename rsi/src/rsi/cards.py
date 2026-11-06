@@ -7,29 +7,24 @@ FILE = "VARIANT.md"  # never reaches the agent
 TITLE_MAX = 100
 
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")  # variant name
-_KEY = r"(hypothesis|evidence|predicts?|predictions?|ports?)"
-# a field line like "hypothesis: ...", with an optional bullet or bold
+_KEY = r"(what|why|expect|reuses)"
+# a field line like "Why: ...", with an optional bullet or bold
 _FIELD_LINE = re.compile(rf"^[-*\s]*\**\s*{_KEY}\s*\**\s*:\s*\**\s*(.*)$", re.IGNORECASE)
-# or a heading like "## Evidence"
+# or a heading like "## Why"
 _FIELD_HEADING = re.compile(rf"^#+\s*\**\s*{_KEY}\s*\**\s*:?\s*$", re.IGNORECASE)
 
 
 @dataclasses.dataclass(frozen=True)
 class VariantCard:
     title: str
-    hypothesis: str  # what changes and why
-    evidence: str = ""  # what in the runs shows the cause
-    predicts: str = ""  # expected effect on behavior, results and cost
-    ports: tuple[str, ...] = ()  # variants whose ideas it reuses
-
-
-def _field_name(key: str) -> str:
-    key = key.lower()
-    return "predicts" if key.startswith("predict") else "ports" if key.startswith("port") else key
+    what: str  # the change
+    why: str = ""  # what in the runs led to it, and why it helps
+    expect: str = ""  # what should change in behavior, results and cost if it works
+    reuses: tuple[str, ...] = ()  # variants whose ideas it builds on
 
 
 def parse(text: str, title_max: int | None = TITLE_MAX) -> VariantCard:
-    """Parse a card in any format, using loose text as the hypothesis if it has none"""
+    """Parse a card in any format, using loose text as what changed if it doesn't say"""
     title = ""
     parts: dict[str, list[str]] = {}
     loose: list[str] = []
@@ -40,7 +35,7 @@ def parse(text: str, title_max: int | None = TITLE_MAX) -> VariantCard:
             continue
         line_match, heading_match = _FIELD_LINE.match(line), _FIELD_HEADING.match(line)
         if line_match or heading_match:
-            current = _field_name(key=(line_match or heading_match).group(1))
+            current = (line_match or heading_match).group(1).lower()
             parts.setdefault(current, [])
             if line_match and line_match.group(2):
                 parts[current].append(line_match.group(2))
@@ -57,10 +52,10 @@ def parse(text: str, title_max: int | None = TITLE_MAX) -> VariantCard:
         title = title[: title_max - 1].rstrip() + "…"
     return VariantCard(
         title=title,
-        hypothesis=fields.get("hypothesis") or " ".join(loose),
-        evidence=fields.get("evidence", ""),
-        predicts=fields.get("predicts", ""),
-        ports=_port_names(text=fields.get("ports", "")),
+        what=fields.get("what") or " ".join(loose),
+        why=fields.get("why", ""),
+        expect=fields.get("expect", ""),
+        reuses=_reused_names(text=fields.get("reuses", "")),
     )
 
 
@@ -83,8 +78,8 @@ def check(package: Path) -> list[str]:
     return []
 
 
-def _port_names(text: str) -> tuple[str, ...]:
-    """Variant names in a ports field, ignoring asides and 'none'"""
+def _reused_names(text: str) -> tuple[str, ...]:
+    """Variant names in a Reuses line, ignoring asides and 'none'"""
 
     def first_word(part: str) -> str:
         words = part.split()

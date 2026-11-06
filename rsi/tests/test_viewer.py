@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from rsi import cards, core, generation, paths, runs, variants, viewer
+from rsi import cards, core, generation, harness, paths, runs, variants, viewer, views
 
 
 def _assistant(stamp: int, thinking: str, calls: list[dict], text: str = "", stop: str = "toolUse") -> dict:
@@ -92,7 +92,7 @@ def _node(
     for iid in node.runs:
         folder = paths.instances_dir(node_name=name) / iid
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "problem.txt").write_text(f"```\nThe bug in {iid}\nmore\n")
+        (folder / harness.TASK_FILE).write_text(f"```\nThe bug in {iid}\nmore\n")
         (folder / "events.jsonl").write_text("\n".join(_events()))
     return node
 
@@ -104,10 +104,10 @@ def lineage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, core.N
     package = paths.variants_dir() / "cap"
     package.mkdir(parents=True)
     (package / "package.json").write_text("{}")
-    (package / "settings.json").write_text('{"thinkingBudgets": {"medium": 100}}\n')
-    card = cards.VariantCard(title="Cap thinking", hypothesis="h", evidence="e", predicts="p")
-    variants.tree_register(name="cap", parent="baseline", parent_node="root", card=card, diff="+ settings.json")
-    waiting = cards.VariantCard(title="Not run yet", hypothesis="h")
+    (package / "APPEND_SYSTEM.md").write_text("Keep your thinking short.\n")
+    card = cards.VariantCard(title="Cap thinking", what="h", why="e", expect="p")
+    variants.tree_register(name="cap", parent="baseline", parent_node="root", card=card, diff="+ APPEND_SYSTEM.md")
+    waiting = cards.VariantCard(title="Not run yet", what="h")
     variants.tree_register(name="later", parent="baseline", parent_node="root", card=waiting, diff="+ x")
     repeat = _node(name="repeat", parent="root", resolved={"a__b-1": False, "c__d-2": True})
     variant = _node(name="variant", parent="root", variant=str(package), resolved={"a__b-1": True, "c__d-2": True})
@@ -125,8 +125,8 @@ def test_the_tree_is_harnesses_with_their_runs_and_how_each_did(lineage: dict[st
     assert [r["name"] for r in base["runs"]] == ["root", "repeat"]
     cap, later = base["children"]
     assert (cap["title"], cap["href"]) == ("Cap thinking", "#node/variant")
-    assert (base["changed"], cap["changed"]) == ("", "+ settings.json")
-    assert (cap["round"], cap["ports"]) == ("", [])
+    assert (base["changed"], cap["changed"]) == ("", "+ APPEND_SYSTEM.md")
+    assert (cap["round"], cap["reuses"]) == ("", [])
     assert [r["name"] for r in cap["runs"]] == ["variant"]
     assert (cap["solved"], cap["of"]) == (2.0, 2)
     assert cap["standing"]["solves"]["gain"] == 1.0 and cap["standing"]["reference_runs"] == 2
@@ -136,7 +136,7 @@ def test_the_tree_is_harnesses_with_their_runs_and_how_each_did(lineage: dict[st
 
 def test_the_tree_shows_a_variants_whole_title(lineage: dict[str, core.Node]) -> None:
     title = "Cap thinking" + " and keep going" * 10
-    (paths.variants_dir() / "cap" / cards.FILE).write_text(f"# {title}\nhypothesis: h\n")
+    (paths.variants_dir() / "cap" / cards.FILE).write_text(f"{title}\nWhat: w\n")
     (found,) = viewer.tree_data()["lineages"]
     assert len(title) > cards.TITLE_MAX and found["tree"]["children"][0]["title"] == title
 
@@ -151,7 +151,7 @@ def test_the_tree_names_the_variant_that_solved_the_most_on_the_probe_set(lineag
     assert (best["name"], best["solved"], best["baseline"], best["solves"]["gain"]) == ("cap", 2.0, 1.0, 1.0)
 
 
-def test_a_run_shows_its_numbers_next_to_its_parents_runs(lineage: dict[str, core.Node]) -> None:
+def test_a_run_shows_its_numbers_next_to_its_parents_runs(lineage: dict[str, core.Node], tmp_path: Path) -> None:
     data = viewer.node_data(name="variant")
     assert (data["label"], data["parent_label"], data["harness"]) == ("cap s42", "baseline s42", "pi 1.4.0")
     assert data["reference"]["runs"] == ["baseline s42", "baseline s42"] and data["reference"]["solved"] == 1.0
@@ -159,11 +159,15 @@ def test_a_run_shows_its_numbers_next_to_its_parents_runs(lineage: dict[str, cor
     assert (rows["a__b-1"]["flip"], rows["a__b-1"]["parent"], rows["a__b-1"]["state"]) == ("fixed", [0, 2], "passed")
     assert (rows["c__d-2"]["flip"], rows["c__d-2"]["parent"]) == ("", [2, 2])
     assert rows["a__b-1"]["brief"] == "The bug in a__b-1"
-    assert data["card"]["hypothesis"] == "h" and "thinkingBudgets" in data["diff"]
+    asked = tmp_path / "asked.txt"
+    asked.write_text("Please resolve this issue:\n\nfloat16 gets upgraded\nmore\n")
+    lead = "Please resolve this issue:\n\n"
+    assert viewer._brief(path=str(asked), stamp=1.0, lead=lead) == "float16 gets upgraded"
+    assert data["card"]["what"] == "h" and "Keep your thinking short." in data["diff"]
     assert data["card"]["result"][:3] == [
         "from root",
         "1 run, 2.0/2 solved per run",
-        "solved +1.0 ± 0.7 tasks per run (z 1.41; 1 run vs 2 of the parent, 2 tasks): within noise",
+        "solved +1.0 ± 0.7 tasks per run, within noise (1 run vs 2 of the parent, 2 tasks)",
     ]
     repeat = viewer.node_data(name="repeat")
     assert (repeat["card"], repeat["diff"]) == (None, "")
@@ -288,10 +292,22 @@ def test_a_session_shows_what_its_checks_made_of_it(lineage: dict[str, core.Node
     (session / "out" / "variants").mkdir(parents=True)
     (session / "prompt.md").write_text("You are improving pi.")
     (session / "events.jsonl").write_text("\n".join(_events()))
+    teacher = {"name": "opus", "agent": "copilot", "model": "m", "effort": "max"}
+    (round_dir / generation.ROUND).write_text(json.dumps({"teacher": teacher, "areas": ["tools"]}))
     (round_dir / "checks" / "session-1-tools" / "cap").mkdir(parents=True)
+    pushy = round_dir / "checks" / "session-1-tools" / "pushy"
+    (pushy / "question").mkdir(parents=True)
+    (pushy / "check.log").write_text("ok: pi loads the package\n")
+    (pushy / "question" / "javascript.log").write_text("problem: the agent answered, and the package made it go on\n")
+    (pushy / "PROBLEMS.md").write_text("- javascript question: the agent answered, and the package made it go on\n")
     data = viewer.session_data(node_name="root", round_id="20261027-163053", session=1)
     assert data["instructions"] == "You are improving pi."
     assert data["outcome"]["status"] == "registered" and data["outcome"]["registered"] == ["cap"]
+    assert data["outcome"]["checks"]["pushy"] == (
+        "- javascript question: the agent answered, and the package made it go on\n\n\n"
+        "check.log:\nok: pi loads the package\n\n\n"
+        "question/javascript.log:\nproblem: the agent answered, and the package made it go on\n"
+    )
     rounds = viewer.node_data(name="root")["rounds"]
     assert rounds[0]["registered"] == 1 and rounds[0]["live"] is False
     assert (rounds[0]["sessions"][0]["n"], rounds[0]["sessions"][0]["area"]) == (1, "tools")
@@ -328,32 +344,15 @@ def test_parse_patch_counts_and_lines() -> None:
     assert patch["stats"] == "2 files · +3 −1"
 
 
-def test_the_eval_report_reads_as_expected_against_actual(tmp_path: Path) -> None:
-    eval_dir = tmp_path / "eval"
-    eval_dir.mkdir()
-    tests = {
-        "FAIL_TO_PASS": {"success": ["pkg/test_a.py::t0"], "failure": ["pkg/test_a.py::t1"]},
-        "PASS_TO_PASS": {"success": ["pkg/test_b.py::t2"], "failure": []},
-    }
-    report = {"t__x-1": {"resolved": False, "patch_successfully_applied": True, "tests_status": tests}}
-    (eval_dir / "report.json").write_text(json.dumps(report))
-    (eval_dir / "test_output.txt").write_text("FAILED pkg/test_a.py::t1\n= 1 failed, 430 passed =\nTest Exit Code: 1\n")
-    evald = viewer._read_eval(task_dir=tmp_path)
-    assert evald is not None and (evald["resolved"], evald["applied"], evald["infra"]) == (False, True, False)
-    assert evald["f2p"] == {"total": 2, "passed": 1, "failed": ["pkg/test_a.py::t1"]}
-    assert evald["p2p"] == {"total": 1, "passed": 1, "failed": []}
-    assert "FAILED pkg/test_a.py::t1" in evald["log"] and "Test Exit Code: 1" in evald["log"]
-    assert viewer._read_eval(task_dir=tmp_path / "nowhere") is None
-
-
 def test_classify_ordering() -> None:
     ok = core.TaskRun(instance_id="a", status="ok", seconds=1.0, resolved=True)
     ok.metrics = core.TaskMetrics(requests=1, patch_lines=1)
-    assert viewer._classify(run=ok, evald={"resolved": True, "infra": False, "applied": True})[0] == "ok"
+    judged = views.Verdict(resolved=True, applied=True, infra=False, checks=[], log="")
+    assert viewer._classify(run=ok, judged=judged)[0] == "ok"
     err = core.TaskRun(instance_id="a", status="error", seconds=1.0, error="boom", resolved=False)
-    assert viewer._classify(run=err, evald=None) == ("err", "error: boom")
+    assert viewer._classify(run=err, judged=None) == ("err", "error: boom")
     empty = core.TaskRun(instance_id="a", status="ok", seconds=1.0, resolved=False)
-    assert viewer._classify(run=empty, evald=None)[0] == "warn"
+    assert viewer._classify(run=empty, judged=None)[0] == "warn"
 
 
 def test_save_puts_the_viewer_and_every_answer_it_asks_for_in_one_file(

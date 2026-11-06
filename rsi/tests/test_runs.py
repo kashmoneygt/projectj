@@ -110,6 +110,20 @@ def test_a_lineage_without_a_probe_set_says_how_to_write_it(tmp_path, monkeypatc
     assert not (paths.node_dir(name="root") / "probe.txt").exists()
 
 
+def test_a_probe_set_picked_elsewhere_is_kept_as_given(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    root = _scored(name="root", outcomes={"a-1": True, "b-2": False, "c-3": True})
+    with pytest.raises(ValueError, match="didn't run 1 of these tasks: z-9"):
+        runs.carry_probe(root=root, probe=["a-1", "z-9"], hidden=["a-1"])
+    with pytest.raises(ValueError, match="aren't in the probe set: c-3"):
+        runs.carry_probe(root=root, probe=["a-1", "b-2"], hidden=["c-3"])
+    assert not runs.probe_path(root=root).exists()
+    assert runs.carry_probe(root=root, probe=["c-3", "a-1"], hidden=["c-3"]) == ["c-3", "a-1"]
+    assert runs.lineage_probe(root=root) == ["c-3", "a-1"]
+    assert runs.lineage_hidden(root=root) == {"c-3"}
+    assert "# picked before this lineage started\n" in runs.probe_path(root=root).read_text()
+
+
 def test_the_probe_hides_half_its_failures_and_half_its_successes(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     monkeypatch.setattr(runs, "PROBE_SUCCESSES", 4)

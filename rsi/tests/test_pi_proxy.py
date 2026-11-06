@@ -1,4 +1,3 @@
-import ast
 import asyncio
 import collections
 import json
@@ -11,21 +10,13 @@ import pytest
 from rsi import core, folders, harness, paths
 
 pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
-
-
-def _forwarder() -> dict:
-    # run the forwarder in-process, under a name that doesn't start its server
-    scope = {"__name__": "forwarder"}
-    exec(pi._FORWARDER, scope)  # noqa: S102
-    return scope
+forwarder = folders.module(root=paths.harnesses_dir(), name="pi", file="forwarder.py")
 
 
 def _read(direction: str, data: bytes, methods: tuple[str, ...] = (), piece: int = 5) -> list[dict]:
-    forwarder = _forwarder()
-
     async def go() -> list[dict]:
         entries: list[dict] = []
-        tap = forwarder["Tap"](forwarder[direction], collections.deque(methods), entries.append)
+        tap = forwarder.Tap(read=getattr(forwarder, direction), methods=collections.deque(methods), log=entries.append)
         for start in range(0, len(data), piece):
             tap.feed(data[start : start + piece])
             await asyncio.sleep(0)
@@ -47,11 +38,6 @@ def _chunk(data: bytes) -> bytes:
 
 def _reply(body: bytes) -> bytes:
     return f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body
-
-
-def test_forwarder_runs_on_the_pi_images_python() -> None:
-    # the pi image runs python 3.11
-    ast.parse(pi._FORWARDER, feature_version=(3, 11))
 
 
 def test_forwarder_logs_each_requests_parameters_without_the_conversation() -> None:
@@ -126,7 +112,6 @@ def test_forwarder_finds_the_usage_servers_report() -> None:
 
 
 def test_forwarder_passes_every_byte_on_and_logs_who_sent_it(tmp_path: Path) -> None:
-    forwarder = _forwarder()
     log_file = tmp_path / "requests-11501.jsonl"
     request = _post(path="/v1/chat/completions", body=json.dumps({"model": "q", "messages": []}).encode())
     reply = (
@@ -143,8 +128,9 @@ def test_forwarder_passes_every_byte_on_and_logs_who_sent_it(tmp_path: Path) -> 
 
     async def go() -> bytes:
         server = await asyncio.start_server(model, "127.0.0.1", 0)
-        forwarder["HOST"], forwarder["PORT"] = "127.0.0.1", server.sockets[0].getsockname()[1]
-        proxy = await asyncio.start_server(forwarder["handle"], "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        upstream = forwarder.Upstream(host="127.0.0.1", port=port, log_path=str(log_file))
+        proxy = await asyncio.start_server(upstream.handle, "127.0.0.1", 0)
         reader, writer = await asyncio.open_connection("127.0.0.1", proxy.sockets[0].getsockname()[1])
         writer.write(request)
         await writer.drain()
@@ -158,7 +144,6 @@ def test_forwarder_passes_every_byte_on_and_logs_who_sent_it(tmp_path: Path) -> 
         server.close()
         return answer
 
-    forwarder["LOG"] = str(log_file)
     assert asyncio.run(go()) == reply
     assert received == [request]
     lines = [json.loads(line) for line in log_file.read_text().splitlines()]
@@ -234,9 +219,17 @@ def test_sandbox_network_replaces_a_forwarder_from_other_code(tmp_path: Path, mo
     assert removed == ["proxy-0"]
     (run,) = containers.runs
     assert run["name"] == "rsi-model-proxy-11501"
-    assert run["command"][:3] == ["python3", "-c", pi._FORWARDER]
-    assert run["command"][3:] == ["host.docker.internal", "11501", "/logs/requests-11501.jsonl"]
-    assert run["volumes"] == {str(tmp_path / "models" / "logs"): {"bind": "/logs", "mode": "rw"}}
+    assert run["command"] == [
+        "python3",
+        "/opt/rsi/forwarder.py",
+        "host.docker.internal",
+        "11501",
+        "/logs/requests-11501.jsonl",
+    ]
+    assert run["volumes"] == {
+        str(tmp_path / "models" / "logs"): {"bind": "/logs", "mode": "rw"},
+        str(pi.FORWARDER_SCRIPT): {"bind": "/opt/rsi/forwarder.py", "mode": "ro"},
+    }
     assert pi.request_log(port=11501) == tmp_path / "models" / "logs" / "requests-11501.jsonl"
     assert (tmp_path / "models" / "logs").is_dir()
     assert network.aliases == [["host.docker.internal"]]
@@ -377,7 +370,7 @@ def test_a_task_run_keeps_its_share_of_the_request_log(
     )
     ctx = harness.RunContext(
         node=node,
-        instance=core.Instance(instance_id="a__b-1", repo="a/b", base_commit="c", problem_statement="Fix it."),
+        instance=core.Instance(instance_id="a__b-1", repo="a/b", base_commit="c", task="Fix it."),
         out_dir=out,
         model=model,
         endpoint=core.ModelEndpoint(

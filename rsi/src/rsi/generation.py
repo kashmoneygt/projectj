@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import logging
 import shutil
 import statistics
@@ -13,6 +14,7 @@ log = logging.getLogger(__name__)
 DIFF_MAX_CHARS = 3_000  # so a task file fits one read_file call
 TEACHER_OUT = "out"  # mounted at /out in the teacher's container
 NONE = "NONE.md"  # written when the teacher has nothing worth running
+ROUND = "round.json"  # the round's teacher and areas, so the viewer knows whose sessions they are
 AREAS = ("tools", "middleware", "context")  # besides open and compose
 
 
@@ -27,6 +29,18 @@ class TeacherUnavailable(Exception):
     """A teacher session failed before doing any work (service down or out of quota)"""
 
 
+def teacher_text(path: Path, out: Path) -> str | None:
+    """A file the teacher wrote under out, or None if it isn't there, isn't a regular file or a symlink leads to it"""
+    # the teacher writes as root, so a symlink could point at any file on the host machine
+    try:
+        real = path.resolve(strict=True)
+    except OSError:
+        return None
+    if real != out.resolve() / path.relative_to(out) or not real.is_file():
+        return None
+    return real.read_text(errors="replace")
+
+
 def _tools_line(metrics: core.TaskMetrics) -> str:
     calls = [
         f"{name} {stat.count}" + (f" ({stat.errors} errors)" if stat.errors else "")
@@ -35,20 +49,20 @@ def _tools_line(metrics: core.TaskMetrics) -> str:
     return ", ".join(calls) or "none"
 
 
-def _ended(run: core.TaskRun, metrics: core.TaskMetrics) -> str:
+def _ended(run: core.TaskRun) -> str:
     """How a run ended ("never started", its status, or its last stop reason)"""
     if run.status == "ok":
-        return metrics.stop_reason or "-"
-    return "never started" if metrics.requests == 0 else run.status
+        return run.metrics.stop_reason or "-"
+    return "never started" if run.metrics.requests == 0 else run.status
 
 
 def _share(part: float, whole: float) -> str:
     return f"{part / whole:.0%}" if whole else "-"
 
 
-def _behavior_column(runs: list[core.TaskRun], metrics: dict[str, core.TaskMetrics]) -> list[str]:
+def _behavior_column(runs: list[core.TaskRun]) -> list[str]:
     """One column of overview.md's behavior table (medians per task, shares of totals)"""
-    ms = [metrics[run.instance_id] for run in runs]
+    ms = [run.metrics for run in runs]
     if not ms:
         return ["0"] + ["-"] * 11
     calls = sum(stat.count for m in ms for stat in m.tool_stats.values())
@@ -88,26 +102,23 @@ _BEHAVIOR_ROWS = (
 )
 
 
-def overview_markdown(
-    record: core.Node, metrics: dict[str, core.TaskMetrics], passes: dict[str, tuple[int, int]], diverged: list[str]
-) -> str:
+def overview_markdown(record: core.Node, passes: dict[str, tuple[int, int]], diverged: list[str]) -> str:
     runs = sorted(record.runs.values(), key=lambda run: run.instance_id)
     groups = ([run for run in runs if run.resolved], [run for run in runs if not run.resolved], runs)
-    columns = [_behavior_column(runs=group, metrics=metrics) for group in groups]
+    columns = [_behavior_column(runs=group) for group in groups]
     lines = [
         "# The parent run",
         "",
-        f"- harness: {variants.variant_name(reference=record.variant)} (node {record.name})",
+        f"- harness: {variants.variant_name(reference=record.variant)}",
         (
             f"- model: {record.model.name}, thinking {'on' if record.model.thinking else 'off'}, context window "
             f"{record.model.ctx} tokens, at most {record.model.output_cap} tokens in one response (thinking included)"
         ),
         (
-            f"- each task gets {record.budget.timeout_s} s"
-            + (f" and {record.budget.max_turns} turns" if record.budget.max_turns else ", with no turn limit")
-            + "; a run still going then is stopped and scored as it stands"
+            f"- each task gets {record.budget.timeout_s} s, with no turn limit, and a run still going then is "
+            "stopped and scored as it stands"
         ),
-        f"- result: {len(groups[0])} of {len(runs)} tasks passed the hidden tests",
+        f"- result: {len(groups[0])} of {len(runs)} tasks passed",
     ]
     if diverged:
         lines += [
@@ -136,7 +147,7 @@ def overview_markdown(
     lines += [f"| {row} | {' | '.join(column[i] for column in columns)} |" for i, row in enumerate(_BEHAVIOR_ROWS)]
     tools: dict[str, core.ToolStat] = {}
     for run in runs:
-        for name, stat in metrics[run.instance_id].tool_stats.items():
+        for name, stat in run.metrics.tool_stats.items():
             total = tools.setdefault(name, core.ToolStat())
             total.count += stat.count
             total.errors += stat.errors
@@ -148,15 +159,16 @@ def overview_markdown(
     ]
     endings: dict[str, list[bool]] = {}
     for run in runs:
-        endings.setdefault(_ended(run=run, metrics=metrics[run.instance_id]), []).append(run.resolved)
+        endings.setdefault(_ended(run=run), []).append(run.resolved)
     lines += [
         "",
         "## How runs ended",
         "",
         (
-            "The last request's stop reason (stop: the agent finished; length: cut at the output cap; toolUse: "
-            "ended while calling tools), or the run's status when it did not end on its own (timeout, error). "
-            "never started: the run failed before its first model request; its transcript has the error."
+            "The last request's stop reason, or the run's status if it didn't end on its own. stop means the "
+            "agent finished, length means a response hit the output cap, toolUse means it ended in the middle of "
+            "a tool call, and never started means it failed before its first model request (its transcript has "
+            "the error)."
         ),
         "",
         "| ending | tasks | passed |",
@@ -180,11 +192,11 @@ def overview_markdown(
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for run in runs:
-        m = metrics[run.instance_id]
+        m = run.metrics
         passed, tries = passes.get(run.instance_id, (int(run.resolved), 1))
         lines.append(
             f"| {run.instance_id} | {'yes' if run.resolved else 'no'} | {passed} of {tries} | "
-            f"{_ended(run=run, metrics=m)} | {run.seconds / 60:.1f} | {m.requests} | {m.output_tokens} | "
+            f"{_ended(run=run)} | {run.seconds / 60:.1f} | {m.requests} | {m.output_tokens} | "
             f"{_share(part=m.reasoning_tokens, whole=m.output_tokens)} | {m.peak_output_tokens} | "
             f"{m.capped_requests} | {m.context_pct}% | {_tools_line(metrics=m)} | {m.patch_lines} |"
         )
@@ -207,14 +219,15 @@ def pass_counts(record: core.Node, nodes: list[core.Node], hidden: set[str]) -> 
     return counts
 
 
-def task_markdown(run: core.TaskRun, metrics: core.TaskMetrics, transcript: str) -> str:
+def task_markdown(run: core.TaskRun, transcript: str) -> str:
     verdict = "passed" if run.resolved else "failed"
+    metrics = run.metrics
     thinking = _share(part=metrics.reasoning_tokens, whole=metrics.output_tokens)
     lines = [
         f"# {run.instance_id}: {verdict}",
         "",
         (
-            f"ended {_ended(run=run, metrics=metrics)} · {run.seconds / 60:.1f} min · {metrics.requests} requests · "
+            f"ended {_ended(run=run)} · {run.seconds / 60:.1f} min · {metrics.requests} requests · "
             f"{metrics.output_tokens} output tokens ({thinking} thinking) · peak context {metrics.context_pct}% · "
             f"tools: {_tools_line(metrics=metrics)}"
         ),
@@ -230,7 +243,7 @@ def task_markdown(run: core.TaskRun, metrics: core.TaskMetrics, transcript: str)
 
 
 def stage(record: core.Node, h: harness.Harness, dest: Path, nodes: list[core.Node]) -> Path:
-    """Stage the round's fixed files: the parent's runs, package, system prompt and harness doc"""
+    """Stage the round's fixed files: the parent's runs, package and history, its system prompt and the harness doc"""
     if dest.exists():
         raise FileExistsError(f"{dest} already exists")
     hidden = runs.lineage_hidden(root=tree.lineage(name=record.name, nodes=nodes)[0])
@@ -242,19 +255,20 @@ def stage(record: core.Node, h: harness.Harness, dest: Path, nodes: list[core.No
         dest / "parent",
         ignore=shutil.ignore_patterns(cards.FILE, ".*"),
     )
-    metrics: dict[str, core.TaskMetrics] = {}
+    (dest / "log.md").write_text(
+        variants.lineage_log(
+            parent=variants.variant_name(reference=record.variant),
+            entries=variants.tree_load(),
+            nodes=nodes,
+            baseline=h.package_dir,
+        )
+    )
     told, told_in = "", ""
     for instance_id, run in sorted(shown.runs.items()):
         instance_dir = paths.instances_dir(node_name=record.name) / instance_id
-        # recomputed, so older nodes pick up metrics fixes
-        metrics[instance_id] = h.task_metrics(
-            instance_dir=instance_dir, model=record.model, seconds=run.seconds, patch=run.patch
-        )
         for folder, full in ((dest / "tasks", False), (dest / "tasks" / "full", True)):
             transcript = h.transcript(instance_dir=instance_dir, full=full)
-            (folder / f"{instance_id}.md").write_text(
-                task_markdown(run=run, metrics=metrics[instance_id], transcript=transcript)
-            )
+            (folder / f"{instance_id}.md").write_text(task_markdown(run=run, transcript=transcript))
         if not told:
             told, told_in = h.system_context(instance_dir=instance_dir), instance_id
     if told:
@@ -264,9 +278,7 @@ def stage(record: core.Node, h: harness.Harness, dest: Path, nodes: list[core.No
         )
     passes = pass_counts(record=record, nodes=nodes, hidden=hidden)
     diverged = stage_divergences(dest=dest, h=h, record=shown, nodes=nodes, passes=passes)
-    (dest / "overview.md").write_text(
-        overview_markdown(record=shown, metrics=metrics, passes=passes, diverged=diverged)
-    )
+    (dest / "overview.md").write_text(overview_markdown(record=shown, passes=passes, diverged=diverged))
     return dest
 
 
@@ -287,7 +299,9 @@ def stage_divergences(
         passed, tries = passes[task]
         sections = [f"# {task}: passed in {passed} of {tries} runs of the parent's harness"]
         for label, node in (("passed", sides[task][True]), ("failed", sides[task][False])):
-            sections.append(_run_section(h=h, node=node, task=task, label=f"{label} (run {node.name})"))
+            sections.append(
+                _run_section(h=h, node=node, task=task, label=f"{label} (run {variants.run_label(node=node)})")
+            )
         (folder / f"{task}.md").write_text("\n\n".join(sections) + "\n")
     return diverged
 
@@ -296,8 +310,7 @@ def _run_section(h: harness.Harness, node: core.Node, task: str, label: str) -> 
     """One run of a task under its own heading"""
     run = node.runs[task]
     instance_dir = paths.instances_dir(node_name=node.name) / task
-    metrics = h.task_metrics(instance_dir=instance_dir, model=node.model, seconds=run.seconds, patch=run.patch)
-    body = task_markdown(run=run, metrics=metrics, transcript=h.transcript(instance_dir=instance_dir, full=False))
+    body = task_markdown(run=run, transcript=h.transcript(instance_dir=instance_dir, full=False))
     return f"## {label}\n\n" + body.split("\n", 1)[1].strip()
 
 
@@ -324,13 +337,35 @@ def stage_results(
         folder = dest / "results" / name
         folder.mkdir(parents=True)
         for task, flip in flips.items():
-            sections = [f"# {task}: {flip} by {name} (run {child.name}, parent run {reference.name})"]
+            runs_of = f"run {variants.run_label(node=child)}, parent run {variants.run_label(node=reference)}"
+            sections = [f"# {task}: {flip} by {name} ({runs_of})"]
             for label, node in ((name, child), ("parent", reference)):
                 sections.append(_run_section(h=h, node=node, task=task, label=label))
             (folder / f"{flip}-{task}.md").write_text("\n\n".join(sections) + "\n")
         fixed = sum(flip == "fixed" for flip in flips.values())
         staged[name] = f"{fixed} fixed and {len(flips) - fixed} broken tasks, each run next to the parent's"
     return staged
+
+
+def turned_down(record: core.Node) -> list[str]:
+    """A line for each candidate from this parent the checks rejected, and each area a session declined"""
+    found: list[str] = []
+    for out in sorted((paths.node_dir(name=record.name) / "generations").glob("*")):
+        for problems in sorted(out.glob("checks/*/*/PROBLEMS.md")):
+            session, name = problems.parent.parent.name, problems.parent.name
+            teacher_out = out / session / TEACHER_OUT
+            card = teacher_text(path=teacher_out / "variants" / name / cards.FILE, out=teacher_out)
+            title = cards.parse(text=card or "").title or "with no title"
+            why = problems.read_text(errors="replace").splitlines()[0].removeprefix("- ")
+            found.append(f"- `{name}`, {title}. Rejected, since {why}")
+        for none in sorted(out.glob(f"session-*/{TEACHER_OUT}/variants/{NONE}")):
+            said = teacher_text(path=none, out=none.parents[1])
+            if said is None:
+                continue
+            area = none.parents[2].name.split("-", 2)[-1]
+            said = " ".join(said.split())[:300]
+            found.append(f"- The {area} session made nothing and " + (f'said "{said}"' if said else "gave no reason"))
+    return found
 
 
 def refresh_tree(
@@ -346,7 +381,14 @@ def refresh_tree(
     results = stage_results(dest=dest, h=h, entries=entries, nodes=nodes, hidden=runs.lineage_hidden(root=lineage[0]))
     chain = [variants.variant_name(reference=n.variant) for n in lineage]
     (dest / "tree.md").write_text(
-        variants.tree_markdown(entries=entries, nodes=nodes, lineage=chain, results=results, parent_node=record.name)
+        variants.tree_markdown(
+            entries=entries,
+            nodes=nodes,
+            lineage=chain,
+            results=results,
+            parent_node=record.name,
+            turned_down=turned_down(record=record),
+        )
     )
 
 
@@ -423,15 +465,17 @@ def collect(
     h: harness.Harness,
     terms: tuple[str, ...],
     checks: Path,
+    endpoint: core.ModelEndpoint,
 ) -> list[variants.VariantEntry]:
-    """Register each candidate that passes the checks (the others' problems go in checks/)"""
-    found = sorted(produced.iterdir()) if produced.is_dir() else []
+    """Register the session's variant if it passes the checks (the others' problems go in checks/)"""
+    # a symlink here would make every folder it leads to a candidate
+    found = sorted(produced.iterdir()) if produced.is_dir() and not produced.is_symlink() else []
     candidates = [d for d in found if d.is_dir() and not d.is_symlink()]
     if not candidates:
-        log.warning("the session wrote no variant under %s", produced)
-    registered: list[variants.VariantEntry] = []
+        log.warning(f"the session wrote no variant under {produced}")
+    entries = variants.tree_load()
+    passed: list[Path] = []
     for candidate in candidates:
-        entries = variants.tree_load()
         problems = candidate_problems(
             candidate=candidate,
             parent_package=parent_package,
@@ -440,39 +484,58 @@ def collect(
             terms=terms,
             log_dir=checks / candidate.name,
         )
+        if not problems:
+            log.info(f"asking {candidate.name} the questions that need no change")
+            problems = h.question_problems(
+                variant=candidate, out_dir=checks / candidate.name / "question", model=record.model, endpoint=endpoint
+            )
         if problems:
-            (checks / candidate.name).mkdir(parents=True, exist_ok=True)
-            (checks / candidate.name / "PROBLEMS.md").write_text("".join(f"- {p}\n" for p in problems))
-            log.warning("rejected %s: %s", candidate.name, "; ".join(problems))
-            continue
-        card = cards.read(package=candidate)
-        assert card is not None  # cards.check found a card
-        unknown = [port for port in card.ports if port not in entries]
-        if unknown:
-            log.warning("%s: ports %s are not in the tree; dropped", candidate.name, unknown)
-            card = dataclasses.replace(card, ports=tuple(port for port in card.ports if port in entries))
-        registry = paths.variants_dir()
-        taken = set(entries) | ({p.name for p in registry.iterdir()} if registry.is_dir() else set())
-        name = variants.free_name(proposed=candidate.name, taken=taken)
-        if name != candidate.name:
-            log.info("registering %s as %s", candidate.name, name)
-        diff = variants.diff_summary(base=parent_package, variant=candidate)
-        # package first, so a crash never leaves a tree entry without one
-        registry.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(candidate), str(registry / name))
-        entry = variants.tree_register(
-            name=name,
-            parent=variants.variant_name(reference=record.variant),
-            parent_node=record.name,
-            card=card,
-            diff=diff,
-            created_by=created_by,
-            area=area,
-            round=round,
-        )
-        log.info("registered %s: %s (%s)", entry.name, entry.title, entry.diff)
-        registered.append(entry)
-    return registered
+            _reject(candidate=candidate, problems=problems, checks=checks)
+        else:
+            passed.append(candidate)
+    if len(passed) > 1:
+        # each one takes hours to run, and a session is asked for one
+        names = ", ".join(candidate.name for candidate in passed)
+        for candidate in passed:
+            problem = f"the session handed in {len(passed)} variants that pass the checks ({names}), not one"
+            _reject(candidate=candidate, problems=[problem], checks=checks)
+        return []
+    if not passed:
+        return []
+    candidate = passed[0]
+    card = cards.read(package=candidate)
+    assert card is not None  # cards.check found a card
+    unknown = [name for name in card.reuses if name not in entries]
+    if unknown:
+        log.warning(f"{candidate.name}: it reuses {unknown}, which aren't in the tree; dropped")
+        card = dataclasses.replace(card, reuses=tuple(name for name in card.reuses if name in entries))
+    registry = paths.variants_dir()
+    taken = set(entries) | ({p.name for p in registry.iterdir()} if registry.is_dir() else set())
+    name = variants.free_name(proposed=candidate.name, taken=taken)
+    if name != candidate.name:
+        log.info(f"registering {candidate.name} as {name}")
+    diff = variants.diff_summary(base=parent_package, variant=candidate)
+    # package first, so a crash never leaves a tree entry without one
+    registry.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(candidate), str(registry / name))
+    entry = variants.tree_register(
+        name=name,
+        parent=variants.variant_name(reference=record.variant),
+        parent_node=record.name,
+        card=card,
+        diff=diff,
+        created_by=created_by,
+        area=area,
+        round=round,
+    )
+    log.info(f"registered {entry.name}: {entry.title} ({entry.diff})")
+    return [entry]
+
+
+def _reject(candidate: Path, problems: list[str], checks: Path) -> None:
+    (checks / candidate.name).mkdir(parents=True, exist_ok=True)
+    (checks / candidate.name / "PROBLEMS.md").write_text("".join(f"- {p}\n" for p in problems))
+    log.warning(f"rejected {candidate.name}: {'; '.join(problems)}")
 
 
 def generate(
@@ -486,17 +549,16 @@ def generate(
     """Run a generation round: one teacher session per area, each writing a variant or NONE.md"""
     out = paths.node_dir(name=record.name) / "generations" / time.strftime("%Y%m%d-%H%M%S")
     t = teacher.load(name=teacher_spec.agent)
+    described = t.describe(model=teacher_spec.model, effort=teacher_spec.effort)
     log.info(
-        "generation round for %s in %s (areas %s; teacher %s: %s)",
-        record.name,
-        out,
-        ", ".join(areas),
-        teacher_spec.name,
-        t.describe(model=teacher_spec.model, effort=teacher_spec.effort),
+        f"generation round for {record.name} in {out} (areas {', '.join(areas)}; "
+        f"teacher {teacher_spec.name}: {described})"
     )
+    out.mkdir(parents=True)
+    (out / ROUND).write_text(json.dumps({"teacher": teacher_spec.model_dump(), "areas": areas}, indent=2) + "\n")
     workspace = stage(record=record, h=h, dest=out / "stage", nodes=runs.list_nodes())
     parent_package = variants.node_package(node=record, baseline=h.package_dir)
-    terms = benchmarks.get(name=record.dataset.name).protocol_terms + h.protocol_terms
+    terms = benchmarks.banned_terms(benchmark=benchmarks.get(name=record.dataset.name)) + h.protocol_terms
     registered: list[variants.VariantEntry] = []
     declined: dict[str, str] = {}
     for session, area in enumerate(areas, start=1):
@@ -504,7 +566,7 @@ def generate(
         session_dir = out / f"session-{session}-{area}"
         teacher_out = session_dir / TEACHER_OUT
         session_dir.mkdir(parents=True)
-        log.info("session %s: area %s", session, area)
+        log.info(f"session {session}: area {area}")
         with h.teacher_container(
             workspace=workspace,
             out_dir=teacher_out,
@@ -527,22 +589,17 @@ def generate(
                 timeout_s=timeout_s,
             )
         (session_dir / "transcript.md").write_text(t.transcript(session_dir=session_dir))
+        error = f" ({result.error})" if result.error else ""
         log.info(
-            "session %s ended %s after %.0f s: %s model calls, %s tool calls, %s output tokens, %s%s",
-            session,
-            result.status,
-            result.seconds,
-            result.model_calls,
-            result.tool_calls,
-            result.output_tokens,
-            result.cost or "cost unknown",
-            f" ({result.error})" if result.error else "",
+            f"session {session} ended {result.status} after {result.seconds:.0f} s: {result.model_calls} model "
+            f"calls, {result.tool_calls} tool calls, {result.output_tokens} output tokens, "
+            f"{result.cost or 'cost unknown'}{error}"
         )
         produced = teacher_out / "variants"
-        none = produced / NONE
-        if none.is_file() and not any(d.is_dir() for d in produced.iterdir()):
-            declined[area] = " ".join(none.read_text(errors="replace").split())[:600] or "it gave no reason"
-            log.info("session %s found nothing worth running in area %s: %s", session, area, declined[area])
+        said = teacher_text(path=produced / NONE, out=teacher_out)
+        if said is not None and not any(d.is_dir() for d in produced.iterdir()):
+            declined[area] = " ".join(said.split())[:600] or "it gave no reason"
+            log.info(f"session {session} found nothing worth running in area {area}: {declined[area]}")
             continue
         found = collect(
             produced=produced,
@@ -554,6 +611,7 @@ def generate(
             h=h,
             terms=terms,
             checks=out / "checks" / session_dir.name,
+            endpoint=endpoint,
         )
         registered += found
         if not found and (result.status == "error" or result.tool_calls == 0):

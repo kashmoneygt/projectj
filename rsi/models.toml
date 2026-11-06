@@ -20,15 +20,14 @@ source = "splash:unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M"
 model_id = "qwen-3.8-27b"
 backend = "splash"
 port = 11501
-ctx = 131072  # the native 262144 doesn't fit next to the weights on a 36GB Mac
-parallel = 1
+ctx = 131072 # typical context window size for Mac Studio 36 GB, common graphics cards (RTX 3080+), etc.
+parallel = 2 # two tasks at a time
 seed = 42  # splash takes no seed
 thinking = true
 max_output_tokens = 0
 sampling = { temperature = 1.0, top_p = 0.95, top_k = 20, min_p = 0.0, presence_penalty = 0.0, repetition_penalty = 1.0 }
 # medium adds nothing to the system prompt, unlike the default xhigh
 chat_template_kwargs = { enable_thinking = true, reasoning_effort = "medium", preserve_thinking = true }
-thinking_budget_field = "thinking_token_budget"
 
 # Teachers that write variants (fields in TeacherSpec, src/rsi/core.py)
 [teachers.opus]

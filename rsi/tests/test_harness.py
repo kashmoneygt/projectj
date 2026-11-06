@@ -1,6 +1,11 @@
 import json
 import shutil
 import subprocess
+from pathlib import Path
+
+import docker
+import pytest
+import requests
 
 from rsi import core, folders, harness, paths
 
@@ -22,7 +27,6 @@ def test_pi_package_manifest() -> None:
     assert sorted(p.name for p in h.package_dir.iterdir()) == ["package.json"]
     assert h.doc.is_file()
     assert sorted(p.name for p in h.eval_dir.iterdir()) == ["metrics.ts"]
-    assert h.task_rules.exists()
     assert not (h.package_dir / "prompts").exists()
 
 
@@ -134,9 +138,8 @@ def test_pi_models_json() -> None:
         thinking=True,
         sampling={"temperature": 1.0, "top_p": 0.95, "top_k": 20},
         chat_template_kwargs={"enable_thinking": True, "reasoning_effort": "xhigh"},
-        thinking_budget_field="thinking_token_budget",
     )
-    cfg = pi.pi_models_json(model=qwen, endpoint=_endpoint(), thinking_budgets=False)
+    cfg = pi.pi_models_json(model=qwen, endpoint=_endpoint())
     entry = cfg["providers"]["local"]["models"][0]
     assert cfg["providers"]["local"]["baseUrl"] == "http://host.docker.internal:11501/v1"
     assert cfg["providers"]["local"]["api"] == "openai-completions"
@@ -147,12 +150,10 @@ def test_pi_models_json() -> None:
         "thinkingFormat": "chat-template",
         "chatTemplateKwargs": {"enable_thinking": True, "reasoning_effort": "xhigh"},
     }
-    budgeted = pi.pi_models_json(model=qwen, endpoint=_endpoint(), thinking_budgets=True)
-    assert budgeted["providers"]["local"]["models"][0]["compat"]["thinkingTokenBudgetField"] == "thinking_token_budget"
     assert pi.pi_model_ref(model=qwen) == "local/qwen-3.8-27b"
 
     plain = core.ModelSpec(name="p", source="path:/x", model_id="m", max_output_tokens=16384)
-    cfg = pi.pi_models_json(model=plain, endpoint=_endpoint(), thinking_budgets=True)
+    cfg = pi.pi_models_json(model=plain, endpoint=_endpoint())
     entry = cfg["providers"]["local"]["models"][0]
     assert entry["maxTokens"] == 16384
     assert "samplingParams" not in entry and "reasoning" not in entry and "compat" not in entry
@@ -166,23 +167,18 @@ def test_pi_check_model() -> None:
     assert "thinking off" in pi.HARNESS.check_model(model=off)
 
 
-def test_pi_task_prompt_ignores_child(tmp_path) -> None:
+def test_pi_task_prompt_is_the_task_as_given(tmp_path) -> None:
     h = harness.load(name="pi")
-    pkg = tmp_path / "child-pkg"
-    pkg.mkdir()
-    (pkg / "package.json").write_text("{}")
-    (pkg / "prompts").mkdir()
-    (pkg / "prompts" / "task-rules.md").write_text("CHILD RULE TEXT")
-    instance = core.Instance(instance_id="a__b-1", repo="a/b", base_commit="c", problem_statement="FIX IT")
-    prompt = h.task_prompt(instance=instance)
-    assert prompt == f"FIX IT\n\n{h.task_rules.read_text()}"
-    assert "CHILD RULE TEXT" not in prompt
+    instance = core.Instance(
+        instance_id="a__b-1", repo="a/b", base_commit="c", task="Please resolve this issue:\n\nIt breaks"
+    )
+    assert h.task_prompt(instance=instance) == "Please resolve this issue:\n\nIt breaks"
 
 
 def test_pi_copy_variant_resources(tmp_path) -> None:
     package = tmp_path / "pkg"
     (package / "agents").mkdir(parents=True)
-    (package / "settings.json").write_text('{"defaultTools": ["+grep"], "thinkingBudgets": {"medium": 6000}}')
+    (package / "settings.json").write_text('{"defaultTools": ["+grep"]}')
     (package / "mcp.json").write_text('{"mcpServers": {"srv": {"command": "echo"}}}')
     (package / "SYSTEM.md").write_text("You are a careful engineer.")
     (package / "APPEND_SYSTEM.md").write_text("Run the tests before you finish.")
@@ -191,7 +187,6 @@ def test_pi_copy_variant_resources(tmp_path) -> None:
     agent_dir.mkdir()
     pi.check.copy_agent_resources(package=package, agent_dir=agent_dir)
     assert (agent_dir / "settings.json").read_text() == (package / "settings.json").read_text()
-    assert pi.check.sets_thinking_budgets(package=package)
     assert (agent_dir / "mcp.json").read_text() == '{"mcpServers": {"srv": {"command": "echo"}}}'
     assert (agent_dir / "agents" / "scout.md").read_text().startswith("---")
     assert (agent_dir / "SYSTEM.md").read_text() == "You are a careful engineer."
@@ -202,11 +197,6 @@ def test_pi_copy_variant_resources(tmp_path) -> None:
     bare_agent = tmp_path / "bare-agent"
     pi.check.copy_agent_resources(package=bare, agent_dir=bare_agent)
     assert list(bare_agent.iterdir()) == []
-    assert not pi.check.sets_thinking_budgets(package=bare)
-    (bare / "settings.json").write_text('{"defaultTools": ["+grep"]}')
-    assert not pi.check.sets_thinking_budgets(package=bare)
-    (bare / "settings.json").write_text('{"thinkingBudgets": {"high": 30000}}')
-    assert not pi.check.sets_thinking_budgets(package=bare)
 
 
 def test_pi_stage_runtime_package(tmp_path) -> None:
@@ -267,33 +257,146 @@ def test_pi_cleanup_kills_live_containers() -> None:
     pi.HARNESS.cleanup()
 
 
+class _CheckContainer:
+    """A check's container that ends the way a test says"""
+
+    def __init__(self, ends: str, removed: list[bool]) -> None:
+        self.ends = ends
+        self.removed = removed
+        self.status = "running"
+        self.short_id = "c1"
+
+    def wait(self, timeout: int) -> dict:
+        if self.ends == "interrupt":
+            raise KeyboardInterrupt
+        if self.ends == "timeout":
+            raise requests.exceptions.ReadTimeout("Read timed out")
+        return {"StatusCode": {"ok": 0, "problem": 1, "unavailable": 2}[self.ends]}
+
+    def logs(self, tail: int | None = None) -> bytes:
+        printed = {
+            "ok": "ok: the package stayed out of the way",
+            "problem": "problem: the agent answered, and the package made it go on",
+            "unavailable": "unavailable: pi got no response from the model",
+        }
+        return f"{printed.get(self.ends, 'pi is still going')}\n".encode()
+
+    def kill(self) -> None:
+        self.status = "exited"
+
+    def reload(self) -> None:
+        pass
+
+    def remove(self, force: bool) -> None:
+        self.removed.append(force)
+
+
+class _CheckContainers:
+    def __init__(self, container: _CheckContainer | None) -> None:
+        self.container = container
+
+    def run(self, image: str, **kwargs: object) -> _CheckContainer:
+        if self.container is None:
+            raise docker.errors.DockerException("the docker daemon isn't running")
+        return self.container
+
+
+@pytest.mark.parametrize(
+    ("ends", "found"),
+    [
+        ("ok", (0, "ok: the package stayed out of the way\n")),
+        ("problem", (1, "problem: the agent answered, and the package made it go on\n")),
+        ("timeout", (-1, "problem: the question did not finish within 60 s")),
+        ("unavailable", "the question couldn't run: pi got no response from the model"),
+        ("docker", "the question couldn't run: docker: DockerException: the docker daemon isn't running"),
+        # a question check calls the model, so it mustn't keep going after ctrl-c
+        ("interrupt", "KeyboardInterrupt"),
+    ],
+)
+def test_pi_check_reads_how_its_container_ended(tmp_path, monkeypatch, ends: str, found: tuple[int, str] | str) -> None:
+    removed: list[bool] = []
+    container = None if ends == "docker" else _CheckContainer(ends=ends, removed=removed)
+
+    class Client:
+        containers = _CheckContainers(container=container)
+
+    monkeypatch.setattr(pi.docker, "from_env", lambda: Client())
+    monkeypatch.setattr(pi, "_ensure_image", lambda client, tag, dockerfile: None)
+    monkeypatch.setattr(pi, "_remove_stale_container", lambda client, name: None)
+    command = {"command": ["true"], "volumes": {}, "network": "rsi-sandbox-11501", "timeout_s": 60}
+    log_path = tmp_path / "question.log"
+    if isinstance(found, tuple):
+        assert pi._run_check(what="the question", name="rsi-question", log_path=log_path, **command) == found
+    elif found == "KeyboardInterrupt":
+        with pytest.raises(KeyboardInterrupt):
+            pi._run_check(what="the question", name="rsi-question", log_path=log_path, **command)
+    else:
+        with pytest.raises(harness.CheckUnavailable) as raised:
+            pi._run_check(what="the question", name="rsi-question", log_path=log_path, **command)
+        assert str(raised.value) == found
+    # a container that started is always removed, and its log kept
+    assert removed == ([] if container is None else [True]) and pi._live == []
+    assert log_path.is_file() == (container is not None)
+
+
+def test_pi_question_check_asks_each_question_until_one_has_problems(tmp_path, monkeypatch) -> None:
+    asked: list[tuple[str, list[str], int]] = []
+    printed = {"javascript": "ok: fine\n", "python": "problem: the run changed shipping.py\n"}
+
+    def run_check(
+        what: str,
+        name: str,
+        command: list[str],
+        volumes: dict[str, dict[str, str]],
+        network: str,
+        timeout_s: int,
+        log_path: Path,
+    ) -> tuple[int, str]:
+        question = Path(next(source for source, mount in volumes.items() if mount["bind"] == "/opt/rsi/question"))
+        asked.append((question.name, command, timeout_s))
+        output = printed[question.name]
+        return (1 if output.startswith("problem") else 0), output
+
+    monkeypatch.setattr(pi, "_run_check", run_check)
+    monkeypatch.setattr(pi, "sandbox_network", lambda client, endpoint: "rsi-sandbox-11501")
+    monkeypatch.setattr(pi.docker, "from_env", lambda: None)
+    model = core.ModelSpec(name="q", source="s", model_id="qwen", thinking=True)
+    endpoint = core.ModelEndpoint(model_id="qwen", base_url="http://host.docker.internal:11501/v1")
+
+    def ask() -> list[str]:
+        return pi.HARNESS.question_problems(
+            variant=tmp_path / "v", out_dir=tmp_path / "out", model=model, endpoint=endpoint
+        )
+
+    assert ask() == ["python question: the run changed shipping.py"]
+    assert [question for question, _, _ in asked] == ["javascript", "python"]
+    _, command, timeout_s = asked[0]
+    assert "--tries=2" in command and "--timeout=540" in command and timeout_s == 2 * (540 + 120) + 120
+    # it stops at the first question with problems
+    printed["javascript"] = "problem: the agent never answered\n"
+    asked.clear()
+    assert ask() == ["javascript question: the agent never answered"]
+    assert [question for question, _, _ in asked] == ["javascript"]
+
+
 def test_pi_contract_digest(tmp_path) -> None:
     (tmp_path / "eval").mkdir()
     (tmp_path / "package").mkdir()
-    (tmp_path / "task-rules.md").write_text("rules")
     (tmp_path / "eval" / "metrics.ts").write_text("metrics")
     (tmp_path / "package" / "package.json").write_text("{}")
-    h = pi.PiHarness(
-        package_dir=tmp_path / "package", eval_dir=tmp_path / "eval", task_rules=tmp_path / "task-rules.md"
-    )
+    h = pi.PiHarness(package_dir=tmp_path / "package", eval_dir=tmp_path / "eval")
     digest = h.contract()
     assert len(digest) == 12 and h.contract() == digest
     (tmp_path / "package" / ".DS_Store").write_bytes(b"\0")
     assert h.contract() == digest
-    assert (
-        pi.PiHarness(
-            package_dir=h.package_dir, eval_dir=h.eval_dir, task_rules=h.task_rules, version="1.5.0"
-        ).contract()
-        != digest
-    )
+    assert pi.PiHarness(package_dir=h.package_dir, eval_dir=h.eval_dir, version="1.5.0").contract() != digest
     seen = {digest}
     for change in (
-        lambda: (tmp_path / "task-rules.md").write_text("rules, reworded"),
         lambda: (tmp_path / "eval" / "metrics.ts").write_text("metrics, changed"),
         lambda: (tmp_path / "eval" / "metrics.ts").rename(tmp_path / "eval" / "timing.ts"),
         lambda: (tmp_path / "package" / "SYSTEM.md").write_text("a system prompt"),
     ):
         change()
         seen.add(h.contract())
-    assert len(seen) == 5
+    assert len(seen) == 4
     assert len(pi.HARNESS.contract()) == 12

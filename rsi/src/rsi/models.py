@@ -124,11 +124,11 @@ class LocalServer:
         pid = self._pid()
         if pid is None or not pid_alive(pid=pid):
             return False
-        log.info("%s already starting (pid %s); waiting for readiness", self.program, pid)
+        log.info(f"{self.program} already starting (pid {pid}); waiting for readiness")
         return True
 
     def _launch(self, args: list[str], env: dict[str, str] | None = None, new_session: bool = False) -> None:
-        log.info("%s args: %s", self.program, " ".join(args))
+        log.info(f"{self.program} args: {' '.join(args)}")
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.proc = subprocess.Popen(
             args, stdout=self.log_path.open("ab"), stderr=subprocess.STDOUT, start_new_session=new_session, env=env

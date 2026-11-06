@@ -7,22 +7,28 @@ import subprocess
 import sys
 from pathlib import Path
 
-from rsi import benchmarks, core, paths
+from rsi import benchmarks, core, paths, views
 
 log = logging.getLogger(__name__)
 
 _TASKS_REPO_URL = "https://github.com/SWE-bench/swe-bench-tasks.git"
 # swebench's CLI, but building only missing eval images
 SB_COMMAND = [sys.executable, str(Path(__file__).with_name("swebench_cli.py"))]
+EVAL_LOG_MAX = 18_000  # of the test log the viewer shows, failures first and then the tail
+# the grader's two groups of hidden tests, each with what a failing test in it means
+_CHECKS = (
+    ("FAIL_TO_PASS", "should pass after the fix (FAIL_TO_PASS)", "still failing"),
+    ("PASS_TO_PASS", "should keep passing (PASS_TO_PASS)", "broken"),
+)
 
 
 def run_sb(args: list[str], cwd: Path) -> None:
     cmd = SB_COMMAND + args
-    log.info("$ %s", " ".join(cmd))
+    log.info(f"$ {' '.join(cmd)}")
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}  # stream swebench's output to our log
     proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     for line in proc.stdout:
-        log.info("  %s", line.rstrip())
+        log.info(f"  {line.rstrip()}")
     rc = proc.wait()
     if rc != 0:
         raise subprocess.CalledProcessError(rc, cmd)
@@ -35,7 +41,7 @@ def tasks_repo(clone: bool = False) -> Path:
         return repo
     if not clone:
         raise FileNotFoundError("swe-bench-tasks repo not present; pass --clone-tasks")
-    log.info("cloning SWE-bench/swe-bench-tasks into %s (one-time) ...", repo)
+    log.info(f"cloning SWE-bench/swe-bench-tasks into {repo} (one-time) ...")
     subprocess.run(["git", "clone", "--depth", "1", _TASKS_REPO_URL, str(repo)], check=True)
     return repo
 
@@ -65,12 +71,12 @@ def persist_eval_artifacts(src: Path, instances_dir: Path) -> int:
     return copied
 
 
-def _instance(row: dict) -> core.Instance:
+def _instance(row: dict, request: str) -> core.Instance:
     return core.Instance(
         instance_id=row["instance_id"],
         repo=row["repo"],
         base_commit=row["base_commit"],
-        problem_statement=row["problem_statement"],
+        task=request.replace("{task}", row["problem_statement"].strip()),
     )
 
 
@@ -81,6 +87,7 @@ class SweBenchVerified:
         name="swebench-verified",
         dataset_id="princeton-nlp/SWE-bench_Verified",
         revision="c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+        request="Please resolve this issue:\n\n{task}",
     )
     protocol_terms = (
         "swebench",
@@ -93,6 +100,7 @@ class SweBenchVerified:
         "base commit",
         "benchmark",
         "resolved rate",
+        "hidden tests",  # how its tasks are graded
         "testbed",  # every task's repo path
         # the tasks' repos (not pytest or requests, which any project may use)
         "astropy",
@@ -118,14 +126,14 @@ class SweBenchVerified:
             shuffled = picked[:]
             random.Random(seed).shuffle(shuffled)
             picked = shuffled[:tasks]
-        return [_instance(row=row) for row in picked]
+        return [_instance(row=row, request=self.dataset.request) for row in picked]
 
     def by_ids(self, ids: list[str]) -> list[core.Instance]:
         rows = {r["instance_id"]: r for r in benchmarks.rows(spec=self.dataset)}
         unknown = [i for i in ids if i not in rows]
         if unknown:
             raise ValueError(f"unknown instance id(s) for {self.name}: {unknown[:5]}")
-        return [_instance(row=rows[i]) for i in ids]
+        return [_instance(row=rows[i], request=self.dataset.request) for i in ids]
 
     def build_images(self, instances: list[core.Instance], workers: int, cwd: Path) -> None:
         args = ["images", "build", str(tasks_repo()), "-d", self.alias, "-j", str(workers)]
@@ -153,6 +161,38 @@ class SweBenchVerified:
             shutil.copy2(report, node_dir / report.name)
         return per_instance
 
+    def verdict(self, task_dir: Path) -> views.Verdict | None:
+        try:
+            report = json.loads((task_dir / "eval" / "report.json").read_text())
+        except (OSError, ValueError):
+            return None
+        if not report:
+            return None
+        record = next(iter(report.values()))
+        log_text = ""
+        log_path = task_dir / "eval" / "test_output.txt"
+        if log_path.is_file():
+            lines = log_path.read_text(errors="replace").splitlines()
+            failures = [x for x in lines if x.startswith(("FAILED", "ERROR")) or "Test Exit Code" in x]
+            log_text = "\n".join([*failures, "", f"{'=' * 30} end of log {'=' * 30}", *lines[-60:]])[-EVAL_LOG_MAX:]
+        tests = record.get("tests_status") or {}
+        checks = []
+        for key, label, failing in _CHECKS:
+            status = tests.get(key) or {}
+            passed, failed = len(status.get("success") or []), list(status.get("failure") or [])
+            checks.append(
+                views.Checks(
+                    label=label, failing=failing, total=passed + len(failed), passed=passed, failed=failed[:50]
+                )
+            )
+        return views.Verdict(
+            resolved=bool(record.get("resolved")),
+            applied=bool(record.get("patch_successfully_applied", True)),
+            infra=bool(record.get("infra_failure")),
+            checks=checks,
+            log=log_text,
+        )
+
     def gold(self, instance_id: str, run_id: str, cwd: Path) -> None:
         args = ["eval", self.alias, "--gold", "-i", instance_id, "--run-id", run_id]
         run_sb(args=args + ["--task-repo", str(tasks_repo())], cwd=cwd)
@@ -166,7 +206,7 @@ class SweBenchVerified:
             log.info("no swebench eval images to remove")
             return
         subprocess.run(["docker", "rmi", *stale], capture_output=True, text=True, check=False)
-        log.info("removed %d swebench eval image(s): %s", len(stale), ", ".join(sorted(stale)))
+        log.info(f"removed {len(stale)} swebench eval image(s): {', '.join(sorted(stale))}")
 
 
 BENCHMARK = SweBenchVerified()

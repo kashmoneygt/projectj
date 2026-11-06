@@ -14,6 +14,13 @@ def test_registry_lists_benchmark_folders() -> None:
     assert benchmarks.get(name="swebench-verified") is mod.BENCHMARK
 
 
+def test_a_variant_cant_key_on_the_start_of_the_task_message() -> None:
+    bench = benchmarks.get(name="swebench-verified")
+    terms = benchmarks.banned_terms(benchmark=bench)
+    assert terms[: len(bench.protocol_terms)] == bench.protocol_terms
+    assert terms[-1] == "Please resolve this issue:"
+
+
 def test_verified_benchmark_is_pinned() -> None:
     bm = benchmarks.get(name="swebench-verified")
     assert bm.name == "swebench-verified"
@@ -37,7 +44,7 @@ def test_select_is_deterministic_and_random(monkeypatch) -> None:
     assert len({i.instance_id for i in first}) == 10
     for instance in first:
         assert isinstance(instance, core.Instance)
-        assert instance.instance_id and instance.repo and instance.problem_statement
+        assert instance.instance_id and instance.repo and instance.task
 
 
 def test_select_zero_and_oversize_returns_all(monkeypatch) -> None:

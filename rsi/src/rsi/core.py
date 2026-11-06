@@ -4,8 +4,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Protocol
 
-import pydantic
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Frozen(BaseModel):
@@ -17,6 +16,7 @@ class DatasetSpec(Frozen):
     dataset_id: str
     split: str = "test"
     revision: str = ""  # pinned HF dataset revision
+    request: str = "{task}"  # how a task is put to the agent; {task} is the task's own text
 
 
 class ModelSpec(Frozen):
@@ -35,20 +35,6 @@ class ModelSpec(Frozen):
     max_output_tokens: int = 0  # per response, 0 = the rest of the context window
     sampling: dict[str, Any] = Field(default_factory=dict)  # sent with every request
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)  # for the server's chat template
-    thinking_budget_field: str = ""  # request field the server reads as a thinking token cap
-
-    @pydantic.model_validator(mode="before")
-    @classmethod
-    def _older_record(cls, data: Any) -> Any:
-        """Upgrade node records from before thinking became a bool"""
-        if not isinstance(data, dict) or not isinstance(data.get("thinking"), str):
-            return data
-        data = dict(data)
-        data["thinking"] = data["thinking"] != "off"
-        if data["thinking"] and data.get("sampling_thinking"):
-            data["sampling"] = data["sampling_thinking"]
-        data.setdefault("max_output_tokens", 16384)
-        return data
 
     @property
     def output_cap(self) -> int:
@@ -92,7 +78,6 @@ class ModelBackend(Protocol):
 
 
 class Budget(Frozen):
-    max_turns: int = 0  # 0 = no limit (only older records set one)
     timeout_s: int = 3600  # per task, after which the run is scored as is
 
 
@@ -100,7 +85,7 @@ class Instance(Frozen):
     instance_id: str
     repo: str
     base_commit: str
-    problem_statement: str
+    task: str  # the message the agent gets, as a user would write it
 
 
 class ToolStat(BaseModel):
@@ -156,15 +141,12 @@ class Node(BaseModel):
 
     name: str
     parent: str | None = None
-    suggestion: str | None = None  # variant card title
+    title: str | None = None  # the variant card's title
     diff_summary: str | None = None  # files changed vs the parent's package
     dataset: DatasetSpec
     harness: str
     harness_version: str
-    variant: str = Field(  # package dir, "" for the baseline
-        default="",
-        validation_alias=AliasChoices("variant", "child_package", "harness_variant"),  # older field names
-    )
+    variant: str = ""  # a registered variant's name, another package's dir, or "" for the baseline
     model: ModelSpec
     budget: Budget
     tasks: int

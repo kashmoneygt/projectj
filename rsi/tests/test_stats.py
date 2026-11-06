@@ -30,8 +30,8 @@ def test_one_run_each_is_mcnemars_test() -> None:
     found = stats.evidence(variant=[variant], reference=[parent], tasks=tasks)
     assert found.gain == 2 and found.se == pytest.approx(8**0.5)
     assert found.z == pytest.approx(2 / 8**0.5)
-    assert found.line() == "+2.0 ± 2.8 tasks per run (z 0.71; 1 run vs 1 of the parent, 38 tasks)"
-    assert found.line(reference="a") == "+2.0 ± 2.8 tasks per run (z 0.71; 1 run vs 1 of a, 38 tasks)"
+    assert found.line() == "+2.0 ± 2.8 tasks per run, within noise (1 run vs 1 of the parent, 38 tasks)"
+    assert found.line(reference="a") == "+2.0 ± 2.8 tasks per run, within noise (1 run vs 1 of a, 38 tasks)"
 
 
 def test_more_runs_shrink_the_error_and_settled_tasks_add_nothing() -> None:
@@ -111,6 +111,6 @@ def test_only_tasks_every_run_finished_with_output_count_toward_tokens() -> None
 
 def test_the_token_line_reads_as_a_share_of_the_parents_tokens() -> None:
     found = stats.TokenEvidence(variant_runs=3, reference_runs=3, tasks=44, saving=-math.log(0.77), se=0.09)
-    assert found.line() == "tokens per task -23% ± 9% (z 2.90; 3 runs vs 3 of the parent, 44 tasks)"
+    assert found.line() == "tokens per task -23% ± 9%, better, beyond noise (3 runs vs 3 of the parent, 44 tasks)"
     costlier = stats.TokenEvidence(variant_runs=1, reference_runs=3, tasks=40, saving=-math.log(1.5), se=0.2)
-    assert costlier.line(reference="a") == "tokens per task +50% ± 20% (z -2.03; 1 run vs 3 of a, 40 tasks)"
+    assert costlier.line(reference="a") == "tokens per task +50% ± 20%, worse, beyond noise (1 run vs 3 of a, 40 tasks)"

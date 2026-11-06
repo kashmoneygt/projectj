@@ -154,6 +154,9 @@ def test_runs_compare_across_ports_but_not_across_model_settings() -> None:
     reordered.model = reordered.model.model_copy(update={"sampling": {"top_p": 0.9, "temperature": 1.0}})
     root.model = root.model.model_copy(update={"sampling": {"temperature": 1.0, "top_p": 0.9}})
     assert tree.comparable(a=root, b=reordered)
+    asked = _scored(name="asked", parent="root", variant="", outcomes=probe, created=5.0)
+    asked.dataset = asked.dataset.model_copy(update={"request": "Please do this:\n\n{task}"})
+    assert not tree.comparable(a=reordered, b=asked)
 
 
 def test_runs_made_differently_say_what_differs() -> None:
@@ -169,6 +172,19 @@ def test_runs_made_differently_say_what_differs() -> None:
         'not the same harness contract: "c1" on fix, again; "c2" on base',
         'not the same package files: "d1" on fix; "d2" on again',
     ]
+    asked = again.model_copy(update={"server": fix.server, "variant_digest": "d1"})
+    asked.dataset = asked.dataset.model_copy(update={"request": "Fix this:\n\n{task}"})
+    [problem] = tree.made_differently(compared=[fix, asked], packages=[[fix, asked]])
+    assert problem.startswith("not the same dataset: ") and "Fix this:" in problem and "on again" in problem
+
+
+def test_a_child_made_differently_from_its_parent_has_no_reference_run() -> None:
+    root = _scored(name="root", parent=None, variant="", outcomes={"a": False}, created=1.0)
+    repeat = _scored(name="repeat", parent="root", variant="", outcomes={"a": False}, created=2.0)
+    child = _scored(name="child", parent="root", variant="/v/fix", outcomes={"a": True}, created=3.0)
+    assert tree.reference_run(child=child, nodes=[root, repeat, child]).name == "repeat"
+    child.dataset = child.dataset.model_copy(update={"request": "Fix this:\n\n{task}"})
+    assert tree.reference_run(child=child, nodes=[root, repeat, child]) is None
 
 
 def test_sign_test() -> None:
@@ -194,7 +210,9 @@ def test_profile_counts_the_observables() -> None:
     change = tree.behavior_change(
         before=p, after=tree.profile(node=_scored(name="m", parent=None, variant="", outcomes={"a": True}, created=1.0))
     )
-    assert change.startswith("runs ending cut at the output cap 1→0, runs without a patch 1→1")
+    # what didn't move is left out
+    assert change.startswith("runs ending cut at the output cap 1→0, timeouts/errors 1→0")
+    assert "runs that changed no file" not in change
     assert "thinking share 75%→0%" in change and change.endswith("minutes/task 2.0→0.0")
 
 

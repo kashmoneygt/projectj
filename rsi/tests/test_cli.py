@@ -51,7 +51,7 @@ def _copy_models_toml(root: Path) -> None:
 
 
 def _card(title: str) -> cards.VariantCard:
-    return cards.VariantCard(title=title, hypothesis=f"{title}: hypothesis")
+    return cards.VariantCard(title=title, what=f"{title}: the change")
 
 
 class _FakeBackend:
@@ -111,6 +111,32 @@ def _fake_world(
     return backend
 
 
+def test_images_build_takes_a_task_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    built: list[list[str]] = []
+
+    class Benchmark:
+        def ensure_assets(self, clone: bool) -> None:
+            pass
+
+        def by_ids(self, ids: list[str]) -> list[core.Instance]:
+            return [core.Instance(instance_id=i, repo="r", base_commit="c", task="t") for i in ids]
+
+        def build_images(self, instances: list[core.Instance], workers: int, cwd: Path) -> None:
+            built.append([i.instance_id for i in instances])
+
+    class Harness:
+        def prepare(self, instances: list[core.Instance]) -> None:
+            built.append([i.instance_id for i in instances])
+
+    monkeypatch.setattr(cli.benchmarks, "get", lambda name: Benchmark())
+    monkeypatch.setattr(cli.harness, "load", lambda name: Harness())
+    pool = tmp_path / "pool.txt"
+    pool.write_text("# a pool picked by hand\nb__b-2\na__a-1\n")
+    assert _invoke(args=["images", "build", "--instances", str(pool)]).exit_code == 0
+    assert built == [["b__b-2", "a__a-1"], ["b__b-2", "a__a-1"]]
+
+
 def test_a_stop_reason_reaches_the_log_files(caplog: pytest.LogCaptureFixture) -> None:
     def refuse() -> None:
         cli._stop(reason="nothing to do")
@@ -133,7 +159,7 @@ def test_variants_generate_needs_a_scored_parent(
 
 
 def _ready_to_generate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: generation.Round | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: generation.Round | Exception
 ) -> list[list[str]]:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     parent = _parent_node()
@@ -154,11 +180,8 @@ def _ready_to_generate(
         timeout_s: int,
     ) -> generation.Round:
         asked.append(areas)
-        if found is None:
-            raise generation.TeacherUnavailable(
-                "session 1 failed before doing any work (429 rate limited), so the round stops; the areas left are "
-                "tools, open"
-            )
+        if isinstance(found, Exception):
+            raise found
         return found
 
     monkeypatch.setattr(cli.generation, "generate", generate)
@@ -206,14 +229,24 @@ def test_a_round_where_every_session_found_nothing_worth_running_ends_cleanly(
     assert "no variant was registered" not in caplog.text
 
 
-def test_a_teacher_that_is_down_stops_with_its_reason_logged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    "down",
+    [
+        generation.TeacherUnavailable(
+            "session 1 failed before doing any work (429 rate limited), so the round stops; the areas left are "
+            "tools, open"
+        ),
+        # the model stopped answering, so the variant's question check says nothing about it
+        harness.CheckUnavailable("the javascript question couldn't run: pi got no response from the model"),
+    ],
+)
+def test_a_teacher_or_model_that_is_down_stops_the_round_with_its_reason_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, down: Exception
 ) -> None:
-    _ready_to_generate(tmp_path=tmp_path, monkeypatch=monkeypatch, found=None)
+    _ready_to_generate(tmp_path=tmp_path, monkeypatch=monkeypatch, found=down)
     with pytest.raises(typer.Exit) as stopped:
         cli.variants_generate(parent="t-node", teacher="opus", areas=["tools", "open"], timeout=1)
-    assert stopped.value.exit_code == 1
-    assert "session 1 failed before doing any work (429 rate limited), so the round stops" in caplog.text
+    assert stopped.value.exit_code == 1 and str(down) in caplog.text
 
 
 def test_make_node_records_what_made_its_runs(tmp_path, monkeypatch) -> None:
@@ -223,7 +256,7 @@ def test_make_node_records_what_made_its_runs(tmp_path, monkeypatch) -> None:
     runs.write_node(node=parent)
     vdir = paths.variants_dir() / "tight-loop"
     vdir.mkdir(parents=True)
-    (vdir / "VARIANT.md").write_text("# End every turn with progress\nhypothesis: h\n")
+    (vdir / "VARIANT.md").write_text("End every turn with progress\nWhat: w\n")
     (vdir / "APPEND_SYSTEM.md").write_text("Work in a tight loop.\n")
     monkeypatch.setattr(
         cli.models, "get", lambda name: core.ModelSpec(name="gemma-4-12b", source="path:/tmp/x.gguf", model_id="m")
@@ -239,19 +272,19 @@ def test_make_node_records_what_made_its_runs(tmp_path, monkeypatch) -> None:
         model="gemma-4-12b",
         tasks=1,
         seed=1,
-        budget=core.Budget(),
+        timeout=3600,
         backend=backend,
         variant="tight-loop",
         parent="t-node",
     )
-    assert node.variant == str(vdir.resolve())
+    assert node.variant == "tight-loop"
     assert node.parent == "t-node"
-    assert node.suggestion == "End every turn with progress"
+    assert node.title == "End every turn with progress"
     assert "+ APPEND_SYSTEM.md" in node.diff_summary
     assert (node.server, node.contract) == (SERVER, CONTRACT)
     assert node.variant_digest == variants.package_digest(package=vdir)
     stored = runs.read_node(name=node.name)
-    assert stored.variant == str(vdir.resolve()) and stored.parent == "t-node"
+    assert stored.variant == "tight-loop" and stored.parent == "t-node"
     assert stored.server == SERVER and stored.variant_digest == node.variant_digest
     baseline = cli.make_node(
         name="gemma-4-12b--pi--swebench-verified--baseline--1t--s1",
@@ -260,7 +293,7 @@ def test_make_node_records_what_made_its_runs(tmp_path, monkeypatch) -> None:
         model="gemma-4-12b",
         tasks=1,
         seed=1,
-        budget=core.Budget(),
+        timeout=3600,
         backend=backend,
     )
     assert baseline.variant_digest == "" and baseline.contract == CONTRACT
@@ -290,11 +323,11 @@ def test_variants_list_shows_how_each_variant_did(
         "tight-loop: Tight loop",
         "    from t-node",
         "    1 run, 1.0/1 solved per run",
-        "    solved +1.0 ± 1.0 tasks per run (z 1.00; 1 run vs 1 of the parent, 1 tasks): within noise",
+        "    solved +1.0 ± 1.0 tasks per run, within noise (1 run vs 1 of the parent, 1 tasks)",
     ]
     cli.variants_list(show="tight-loop")
     out = capsys.readouterr().out
-    assert "hypothesis: Tight loop: hypothesis" in out
+    assert "what:       Tight loop: the change" in out
     assert "\n  run:        1/1 vs parent 0/1 on the same tasks (+1 fixed, -0 broken; " in out
     assert "\n  result:     1 run, 1.0/1 solved per run\n  result:     solved +1.0 ± 1.0 tasks per run" in out
     assert "+Work in a tight loop." in out
@@ -312,6 +345,8 @@ def _successor(tmp_path: Path, name: str, outcomes: list[bool], variant: str | N
         budget=core.Budget(),
         tasks=4,
         seed=1,
+        server=SERVER,
+        contract=CONTRACT,
     )
     node.runs = {f"t__t-{i}": core.TaskRun(instance_id=f"t__t-{i}", resolved=ok) for i, ok in enumerate(outcomes)}
     node.task_ids = sorted(node.runs)
@@ -326,10 +361,10 @@ class _FakeBench:
         self._ids = ids
 
     def select(self, tasks: int, seed: int) -> list[core.Instance]:
-        return [core.Instance(instance_id=i, repo="r", base_commit="c", problem_statement="p") for i in self._ids]
+        return [core.Instance(instance_id=i, repo="r", base_commit="c", task="p") for i in self._ids]
 
     def by_ids(self, ids: list[str]) -> list[core.Instance]:
-        return [core.Instance(instance_id=i, repo="r", base_commit="c", problem_statement="p") for i in ids]
+        return [core.Instance(instance_id=i, repo="r", base_commit="c", task="p") for i in ids]
 
 
 def _empty_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ids: list[str]) -> core.Node:
@@ -347,6 +382,16 @@ def test_run_tasks_records_task_set(tmp_path, monkeypatch) -> None:
     stored = runs.read_node(name=node.name)
     assert stored.task_ids == ["a__b-1"]
     assert stored.runs["a__b-1"].status == "ok"
+
+
+def test_run_tasks_runs_as_many_at_once_as_the_model_is_served_for(tmp_path, monkeypatch) -> None:
+    node = _empty_node(tmp_path=tmp_path, monkeypatch=monkeypatch, ids=["a__b-1"])
+    node.model = node.model.model_copy(update={"parallel": 2})
+    widths: list[int] = []
+    monkeypatch.setattr(cli, "_run_pool", lambda node, h, backend, todo, width: widths.append(width))
+    for asked in (0, 1, 5):
+        cli.run_tasks(node=node, h=_FakeHarness(), backend=_FakeBackend(), n_concurrent=asked)
+    assert widths == [2, 1, 2]
 
 
 def test_run_tasks_uses_explicit_instance_set(tmp_path, monkeypatch) -> None:
@@ -500,7 +545,7 @@ def test_finishing_a_run_rejects_mismatched_args(tmp_path: Path, monkeypatch: py
 def test_finishing_a_run_rejects_mismatched_benchmark(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     _copy_models_toml(root=tmp_path)
-    runs.write_node(node=_parent_node())
+    runs.write_node(node=_parent_node().model_copy(update={"contract": harness.load(name="pi").contract()}))
     args = ["run", "--benchmark", "other-benchmark", "--model", "gemma-4-12b", "--node", "t-node"]
     result = _invoke(args=[*args, "--tasks", "1", "--seed", "1"])
     assert result.exit_code == 1
@@ -510,13 +555,21 @@ def test_finishing_a_run_rejects_mismatched_benchmark(tmp_path: Path, monkeypatc
 def test_finishing_a_run_rejects_changed_model_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     _copy_models_toml(root=tmp_path)
+    _fake_world(monkeypatch=monkeypatch)
     gemma = models.get(name="gemma-4-12b")
-    node = _parent_node().model_copy(update={"model": gemma.model_copy(update={"ctx": 4096, "port": 1})})
-    runs.write_node(node=node)
+    made = {
+        "model": gemma.model_copy(update={"ctx": 4096, "port": 1}),
+        "dataset": benchmarks.get(name="swebench-verified").dataset,
+        "server": SERVER,
+        "contract": CONTRACT,
+    }
+    runs.write_node(node=_parent_node().model_copy(update=made))
     args = ["run", "--benchmark", "swebench-verified", "--model", "gemma-4-12b", "--node", "t-node"]
     result = _invoke(args=[*args, "--tasks", "1", "--seed", "1"])
     assert result.exit_code == 1
-    assert "gemma-4-12b settings changed in models.toml (ctx)" in result.output
+    assert "was run under different settings (not the same model settings: " in result.output
+    # the port doesn't count
+    assert '"ctx": 4096' in result.output and '"port"' not in result.output
 
 
 @pytest.mark.parametrize("changed", ["server", "contract", "files"])
@@ -548,12 +601,8 @@ def test_finishing_a_run_rejects_a_node_made_differently(
     args = ["run", "--benchmark", "swebench-verified", "--model", "gemma-4-12b", "--node", "t-node"]
     result = _invoke(args=[*args, "--variant", str(package), "--tasks", "1", "--seed", "1"])
     assert result.exit_code == 1
-    expected = {
-        "server": "node 't-node' ran on another model server",
-        "contract": "the pi harness's contract changed",
-        "files": "the variant's files changed",
-    }
-    assert expected[changed] in result.output
+    field = {"server": "model server", "contract": "harness contract", "files": "package files"}[changed]
+    assert f"was run under different settings (not the same {field}: " in result.output
 
 
 @pytest.mark.parametrize("scored", [False, True])
@@ -665,6 +714,8 @@ def test_probe_set_is_fixed_by_the_lineage_root(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     _scored_root()
     child = _successor(tmp_path=tmp_path, name="v1", outcomes=[True])
+    (tmp_path / "variants" / "v1").mkdir(parents=True)
+    child.dataset = benchmarks.get(name="swebench-verified").dataset
     child.runs = {"a__b-1": core.TaskRun(instance_id="a__b-1", resolved=True)}
     runs.write_node(node=child)
     (tmp_path / "variants" / "v2").mkdir(parents=True)
@@ -728,6 +779,22 @@ def test_the_probe_set_counts_older_runs_and_is_written_once(tmp_path, monkeypat
     assert result.exit_code == 1 and "written already" in result.output
 
 
+def test_the_probe_set_can_be_carried_over_as_given(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    root = _parent_node()
+    root.runs = {iid: core.TaskRun(instance_id=iid, status="ok", resolved=True) for iid in ("a-1", "b-2", "c-3")}
+    root.total, root.resolved = 3, 3
+    runs.write_node(node=root)
+    (tmp_path / "probe.txt").write_text("# an older lineage's probe set\na-1\nb-2\n")
+    (tmp_path / "hidden.txt").write_text("b-2\n")
+    given = ["--tasks", str(tmp_path / "probe.txt"), "--hidden", str(tmp_path / "hidden.txt")]
+    assert "go together" in _invoke(args=["probe", "--root", "t-node", given[0], given[1]]).output
+    assert "--history only counts" in _invoke(args=["probe", "--root", "t-node", *given, "--history", "x"]).output
+    result = _invoke(args=["probe", "--root", "t-node", *given])
+    assert result.exit_code == 0 and "the teacher never sees 1 of them" in result.output
+    assert runs.lineage_probe(root=root) == ["a-1", "b-2"] and runs.lineage_hidden(root=root) == {"b-2"}
+
+
 def test_run_variant_not_in_tree_refused(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     (tmp_path / "variants" / "stray").mkdir(parents=True)
@@ -760,7 +827,7 @@ def test_make_node_rejects_overlong_name(caplog) -> None:
             model="gemma-4-12b",
             tasks=10,
             seed=42,
-            budget=core.Budget(),
+            timeout=3600,
             backend=_FakeBackend(),
         )
     assert "under 200" in caplog.text
@@ -828,7 +895,7 @@ def test_compare_pools_two_sets_of_runs_on_the_tasks_they_share(tmp_path, monkey
         "a mean 1.0",
         "b evolved-1 3",
         "b mean 3.0",
-        "b against a: +2.0 ± 1.0 tasks per run (z 2.00; 1 run vs 2 of a, 4 tasks)",
+        "b against a: +2.0 ± 1.0 tasks per run, better, beyond noise (1 run vs 2 of a, 4 tasks)",
     ]
     assert "not the same model server" in caplog.text
 
@@ -840,7 +907,7 @@ def _lineage(
     _copy_models_toml(root=paths.rsi_root())
     _fake_world(monkeypatch=monkeypatch, backend=backend, h=h)
     now = {"model": models.get(name="gemma-4-12b"), "dataset": benchmarks.get(name="swebench-verified").dataset}
-    root = _parent_node().model_copy(update=now)
+    root = _parent_node().model_copy(update={**now, "server": SERVER, "contract": CONTRACT})
     tasks = [f"t__t-{i}" for i in range(6)]
     root.runs = {iid: core.TaskRun(instance_id=iid, status="ok", resolved=i >= 4) for i, iid in enumerate(tasks)}
     root.task_ids, root.tasks, root.total, root.resolved = tasks, 6, 6, 2
@@ -858,7 +925,9 @@ def _probe_node(root: core.Node, probe: list[str], node: str, variant: str, seed
             "seed": seed,
             "server": SERVER,
             "contract": CONTRACT,
-            "variant_digest": cli._variant_digest(package=Path(variant) if variant else None),
+            "variant_digest": cli._variant_digest(
+                package=variants.resolve_variant(reference=variant) if variant else None
+            ),
         }
     )
     run.runs = {iid: core.TaskRun(instance_id=iid, status="ok") for iid in probe}
@@ -907,7 +976,7 @@ def test_a_variant_runs_with_its_parents_model_benchmark_and_harness(
     assert result.exit_code == 0
     made = runs.read_node(name="qwen-3.8-27b--pi-next--swebench-verified--tight--2t--s1")
     assert (made.model.name, made.dataset.name, made.parent) == ("qwen-3.8-27b", "swebench-verified", "t-node")
-    assert made.variant == str(paths.variants_dir() / "tight")
+    assert made.variant == "tight"
     assert started.ran == [(made.name, None)] and started.scored == [(made.name, 2, True)]
     _register(names=("orphan",), parent="gone")
     result = _invoke(args=["run", "--variant", "orphan", "--tasks", "2", "--seed", "1"])
@@ -942,7 +1011,22 @@ def test_a_baseline_probe_run_is_made_from_the_one_root_with_a_probe_set(
     assert len(started.ran) == 1
 
 
-@pytest.mark.parametrize("changed", ["nothing", "server", "contract", "files"])
+def test_a_baseline_probe_run_leaves_out_roots_made_with_another_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    root, _ = _lineage(monkeypatch=monkeypatch)
+    started = _Started(monkeypatch=monkeypatch)
+    asked = root.dataset.model_copy(update={"request": "{task}"})
+    older = root.model_copy(update={"name": "older", "seed": 2, "dataset": asked})
+    runs.write_node(node=older)
+    runs.write_probe(root=older, nodes=[older])
+    args = ["run", "--model", "gemma-4-12b", "--benchmark", "swebench-verified", "--probe", "--no-score"]
+    assert _invoke(args=[*args, "--seed", "43"]).exit_code == 0
+    assert runs.read_node(name=started.ran[0][0]).parent == root.name
+
+
+@pytest.mark.parametrize("changed", ["nothing", "server", "contract", "files", "request", "timeout", "model"])
 def test_a_run_is_not_spent_when_it_would_not_compare(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str
 ) -> None:
@@ -950,20 +1034,44 @@ def test_a_run_is_not_spent_when_it_would_not_compare(
     backend = _FakeBackend(server={"engine": "fake 1.1"}) if changed == "server" else None
     h = _FakeHarness(contract="contract-2") if changed == "contract" else None
     root, probe = _lineage(monkeypatch=monkeypatch, backend=backend, h=h)
+    if changed == "request":
+        root = root.model_copy(update={"dataset": root.dataset.model_copy(update={"request": "{task}"})})
+        runs.write_node(node=root)
     started = _Started(monkeypatch=monkeypatch)
     for seed in (2, 3):
         _probe_node(root=root, probe=probe, node=f"repeat-s{seed}", variant="", seed=seed)
     _register(names=("next",), parent="t-node")
     package = paths.variants_dir() / "next"
-    _probe_node(root=root, probe=probe, node="next-s1", variant=str(package), seed=1)
+    _probe_node(root=root, probe=probe, node="next-s1", variant="next", seed=1)
     if changed == "files":
         (package / "SYSTEM.md").write_text("Edited after its first run.\n")
-    result = _invoke(args=["run", "--variant", "next", "--probe", "--seed", "2"])
-    name = f"gemma-4-12b--pi--swebench-verified--next--{len(probe)}t--s2"
+    timeout = ["--timeout", "1800"] if changed == "timeout" else []
+    # the model the run asks for, not its parent's
+    model = ["--model", "qwen-3.8-27b"] if changed == "model" else []
+    result = _invoke(args=["run", "--variant", "next", "--probe", "--seed", "2", *timeout, *model])
+    used = "qwen-3.8-27b" if changed == "model" else "gemma-4-12b"
+    name = f"{used}--pi--swebench-verified--next--{len(probe)}t--s2"
     if changed == "nothing":
         assert result.exit_code == 0 and started.ran == [(name, probe)]
         return
     assert result.exit_code == 1 and started.ran == [] and not paths.node_dir(name=name).exists()
-    field = {"server": "model server", "contract": "harness contract", "files": "package files"}[changed]
+    field = {
+        "server": "model server",
+        "contract": "harness contract",
+        "files": "package files",
+        "request": "dataset",
+        "timeout": "time budget",
+        "model": "model settings",
+    }[changed]
     reason = f"this run wouldn't compare with the runs it's judged with, so it isn't started: not the same {field}: "
     assert reason in result.output
+
+
+def test_a_first_probe_run_is_checked_against_its_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    _lineage(monkeypatch=monkeypatch, backend=_FakeBackend(server={"engine": "fake 1.1"}))
+    started = _Started(monkeypatch=monkeypatch)
+    args = ["run", "--model", "gemma-4-12b", "--benchmark", "swebench-verified", "--probe", "--seed", "2"]
+    result = _invoke(args=args)
+    assert result.exit_code == 1 and started.ran == []
+    assert "not the same model server" in result.output

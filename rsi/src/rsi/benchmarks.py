@@ -3,7 +3,7 @@ from typing import Protocol
 
 import datasets
 
-from rsi import core, folders, paths
+from rsi import core, folders, paths, views
 
 
 class Benchmark(Protocol):
@@ -30,12 +30,21 @@ class Benchmark(Protocol):
     ) -> dict[str, bool]:
         """Grade each task, leaving out failed gradings for a second call in the same cwd"""
 
+    def verdict(self, task_dir: Path) -> views.Verdict | None:
+        """How a task was judged, from what scoring left in its folder (None before scoring)"""
+
     def gold(self, instance_id: str, run_id: str, cwd: Path) -> None: ...
     def clean_images(self, cwd: Path) -> None: ...
 
 
 def rows(spec: core.DatasetSpec) -> list[dict]:
     return list(datasets.load_dataset(spec.dataset_id, split=spec.split, revision=spec.revision or None))
+
+
+def banned_terms(benchmark: Benchmark) -> tuple[str, ...]:
+    """Words a variant can't put in front of the agent, which are the benchmark's own and how its task message starts"""
+    lead = benchmark.dataset.request.partition("{task}")[0].strip()
+    return benchmark.protocol_terms + ((lead,) if lead else ())
 
 
 def get(name: str) -> Benchmark:

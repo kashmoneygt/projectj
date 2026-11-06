@@ -36,7 +36,6 @@ _SETTINGS = frozenset(
         "retry",
         "httpIdleTimeoutMs",
         "websocketConnectTimeoutMs",
-        "thinkingBudgets",
         "enableSkillCommands",
         "steeringMode",
         "followUpMode",
@@ -73,6 +72,8 @@ _FIXED_SETTINGS = {
         ("defaultProvider", "defaultModel", "defaultThinkingLevel", "modelThinkingLevels", "enabledModels"),
         "picks the model, its provider or its thinking level",
     ),
+    # pi only sends a budget when the provider config names the server's budget field, and that config is the model's
+    "thinkingBudgets": "caps how much the model thinks, which is set with the model",
     **dict.fromkeys(("httpProxy", "transport", "websockets"), "changes how requests reach the model"),
     "cacheWarming": "sends the model requests of its own",
     **dict.fromkeys(
@@ -114,16 +115,6 @@ def stage_runtime_package(package: Path, dest: Path) -> Path:
         if (package / name).is_dir():
             shutil.copytree(package / name, dest / name, dirs_exist_ok=True)
     return dest
-
-
-def sets_thinking_budgets(package: Path) -> bool:
-    """Check if the package sets a medium thinking budget (the level runs use)"""
-    try:
-        settings = json.loads((package / "settings.json").read_text())
-    except (OSError, ValueError):
-        return False
-    budgets = settings.get("thinkingBudgets") if isinstance(settings, dict) else None
-    return isinstance(budgets, dict) and budgets.get("medium") is not None
 
 
 def copy_agent_resources(package: Path, agent_dir: Path) -> None:
@@ -259,7 +250,8 @@ def term_problems(package: Path, terms: tuple[str, ...]) -> list[str]:
     return problems
 
 
-def static_problems(package: Path, terms: tuple[str, ...] = ()) -> list[str]:
+def static_problems(package: Path, terms: tuple[str, ...] = (), manifest: Path | None = None) -> list[str]:
+    """Problems found without starting pi (manifest is the package.json every variant keeps)"""
     links = sorted(p.relative_to(package).as_posix() for p in package.rglob("*") if p.is_symlink())
     if links:
         return [f"{rel} is a symlink; a package holds regular files only" for rel in links]
@@ -270,9 +262,13 @@ def static_problems(package: Path, terms: tuple[str, ...] = ()) -> list[str]:
     except ValueError as exc:
         return [f"package.json is not valid JSON: {exc}"]
     problems: list[str] = term_problems(package=package, terms=terms)
-    manifest = _pi_manifest(folder=package) or {}
+    if manifest is not None and (package / "package.json").read_bytes() != manifest.read_bytes():
+        problems.append(
+            "package.json differs from the baseline's; leave it unchanged and say what changed in VARIANT.md"
+        )
+    pi_section = _pi_manifest(folder=package) or {}
     root = package.resolve()
-    for entry in manifest.get("extensions", []) + manifest.get("skills", []):
+    for entry in pi_section.get("extensions", []) + pi_section.get("skills", []):
         target = (package / entry.lstrip("+-!")).resolve()
         if target != root and root not in target.parents:
             problems.append(f"package.json lists {entry!r}, which points outside the package")
@@ -364,8 +360,8 @@ def _text(raw: str | bytes | None) -> str:
     return raw.decode(errors="replace") if isinstance(raw, bytes) else raw
 
 
-def check(package: Path, terms: tuple[str, ...] = ()) -> list[str]:
-    problems = static_problems(package=package, terms=terms)
+def check(package: Path, terms: tuple[str, ...] = (), manifest: Path | None = None) -> list[str]:
+    problems = static_problems(package=package, terms=terms, manifest=manifest)
     if any("is a symlink" in problem for problem in problems):
         return problems  # never stage a package with a symlink
     with tempfile.TemporaryDirectory(prefix="check-variant-") as tmp:
@@ -377,13 +373,14 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="check-variant", description="Check a pi variant package.")
     parser.add_argument("package", type=Path)
     parser.add_argument("--terms", type=Path, help="file of words the agent-visible files may not contain")
+    parser.add_argument("--manifest", type=Path, help="the package.json every variant keeps")
     args = parser.parse_args(argv[1:])
     if not args.package.is_dir():
         print(f"usage: check-variant <package dir> ({args.package} is not a directory)")
         return 2
     terms = tuple(line.strip() for line in args.terms.read_text().splitlines() if line.strip()) if args.terms else ()
     try:
-        problems = check(package=args.package.resolve(), terms=terms)
+        problems = check(package=args.package.resolve(), terms=terms, manifest=args.manifest)
     except Exception as exc:  # noqa: BLE001
         problems = [f"check-variant crashed: {type(exc).__name__}: {exc}"]
     for problem in problems:

@@ -1,14 +1,17 @@
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
+from types import ModuleType
 from typing import IO
 
 import pytest
 
-from rsi import core, folders, models, paths, teacher, viewer
+from rsi import core, folders, models, paths, teacher
 
 copilot = folders.module(root=paths.teachers_dir(), name="copilot", file="teacher.py", kind="teacher")
 
@@ -159,16 +162,16 @@ def test_a_stopped_session_still_has_its_transcript_and_cost(tmp_path) -> None:
     assert (calls, output, cost) == (2, 0, "2.5 AI credits, 15 premium requests")
 
 
-def test_the_viewer_reads_a_teacher_session(tmp_path) -> None:
+def test_a_teacher_session_reads_as_steps_for_the_viewer(tmp_path) -> None:
     _write_events(path=tmp_path / "events.jsonl", events=COPILOT_EVENTS)
-    data = viewer._trajectory(folder=tmp_path)
-    assert data["user"] == "Make one variant."
-    steps = [i for i in data["items"] if i["kind"] == "step"]
-    bash, edit = steps[0]["calls"]
-    assert steps[0]["thinking"] == "Read the overview." and steps[0]["t"] == 3000
-    assert (bash["name"], bash["label"], bash["ok"], bash["ms"]) == ("bash", "cat /work/overview.md", True, 2000)
-    assert edit["name"] == "edit" and edit["args"] == {"edits": [{"old": "one", "new": "two"}]} and not edit["ok"]
-    assert any(i["kind"] == "note" for i in data["items"]) and steps[1]["text"] == "Done."
+    view = copilot.TEACHER.trajectory(session_dir=tmp_path)
+    assert view.user == "Make one variant."
+    steps = [i for i in view.items if i.kind == "step"]
+    bash, edit = steps[0].calls
+    assert steps[0].thinking == "Read the overview." and steps[0].t == 3000
+    assert (bash.name, bash.label, bash.ok, bash.ms) == ("bash", "cat /work/overview.md", True, 2000)
+    assert edit.name == "edit" and edit.args == {"edits": [{"old": "one", "new": "two"}]} and not edit.ok
+    assert any(i.kind == "note" for i in view.items) and steps[1].text == "Done."
 
 
 def test_the_mcp_server_speaks_mcp_and_acts_only_in_the_container(monkeypatch, capsys) -> None:
@@ -250,9 +253,14 @@ def test_the_mcp_server_answers_every_request(monkeypatch, capsys) -> None:
     assert [(r["id"], r["error"]["code"]) for r in replies] == [(None, -32700), (None, -32600)]
 
 
-def test_try_variant_sums_up_a_run(tmp_path, monkeypatch) -> None:
+def _try_variant(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """try_variant.py, which imports check_variant from its own folder"""
     monkeypatch.syspath_prepend(paths.harnesses_dir() / "pi")  # python3 does this for a script it runs
-    try_variant = folders.module(root=paths.harnesses_dir(), name="pi", file="try_variant.py")
+    return folders.module(root=paths.harnesses_dir(), name="pi", file="try_variant.py")
+
+
+def test_try_variant_sums_up_a_run(tmp_path, monkeypatch) -> None:
+    try_variant = _try_variant(monkeypatch=monkeypatch)
     records = [
         {"type": "message_update", "assistantMessageEvent": {}},
         {
@@ -288,9 +296,179 @@ def test_try_variant_sums_up_a_run(tmp_path, monkeypatch) -> None:
     ]
 
 
+def _response(stop: str, text: str = "", call: str = "") -> dict:
+    content = [{"type": "text", "text": text}] if text else []
+    content += [{"type": "toolCall", "name": call, "arguments": {}}] if call else []
+    return {"type": "message_end", "message": {"role": "assistant", "stopReason": stop, "content": content}}
+
+
+def _events(path: Path, records: list[dict]) -> Path:
+    path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records))
+    return path
+
+
+def test_the_question_check_says_how_the_package_got_in_the_way(tmp_path, monkeypatch) -> None:
+    try_variant = _try_variant(monkeypatch=monkeypatch)
+
+    def problems(records: list[dict], diff: str = "", finished: bool = True, failed: str = "") -> list[str]:
+        events = _events(path=tmp_path / "events.jsonl", records=records)
+        tried = try_variant.Tried(events=events, repo=tmp_path, diff=diff, finished=finished)
+        return try_variant.question_problems(tried=tried, timeout=540, failed=failed)
+
+    read = _response(stop="toolUse", call="read")
+    answer = _response(stop="stop", text="It still works on its expiry date.")
+    assert problems(records=[read, answer]) == []
+    assert problems(records=[read, answer, read, answer]) == ["the agent answered, and the package made it go on"]
+    assert problems(records=[read, answer], finished=False) == ["the agent answered, but the run hadn't ended 540 s in"]
+    assert problems(records=[read, _response(stop="stop")]) == ["the agent never answered"]
+    assert problems(records=[read], finished=False) == ["the agent never answered in 540 s"]
+    assert problems(records=[], failed="pi got no response from the model") == [
+        "pi got no response from the model, though the model answers a plain request"
+    ]
+    # an answer the package made the agent go on from still counts, even if the next request failed
+    failed = {"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "x"}}
+    assert problems(records=[read, answer, failed], failed="pi's last request failed (x)") == [
+        "the agent answered, and the package made it go on"
+    ]
+    diff = "diff --git a/src/cart.js b/src/cart.js\n--- a/src/cart.js\n+++ b/src/cart.js\n"
+    assert problems(records=[read, answer], diff=diff) == [
+        "the run changed src/cart.js, though the question needed no change"
+    ]
+    # a stray edit a hook then rightly acts on shows both, and the second try tells them apart
+    assert problems(records=[read, answer, read, answer], diff=diff) == [
+        "the agent answered, and the package made it go on",
+        "the run changed src/cart.js, though the question needed no change",
+    ]
+    # a response that quotes an update event is still read
+    quoted = _response(stop="stop", text='It prints {"type":"message_update"} lines.')
+    assert problems(records=[read, quoted]) == []
+
+
+def test_a_run_without_an_answer_from_the_model_says_nothing_about_the_package(tmp_path, monkeypatch) -> None:
+    try_variant = _try_variant(monkeypatch=monkeypatch)
+    events = tmp_path / "events.jsonl"
+    read = _response(stop="toolUse", call="read")
+    failed = {"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "refused"}}
+    assert try_variant.unavailable(events=_events(path=events, records=[])) == "pi got no response from the model"
+    assert try_variant.unavailable(events=_events(path=events, records=[read, failed])) == (
+        "pi's last request failed (refused)"
+    )
+    answer = _response(stop="stop", text="Yes.")
+    assert try_variant.unavailable(events=_events(path=events, records=[read, answer])) == ""
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "code", "asked"),
+    [
+        (["clean"], 0, 1),
+        (["pushy", "clean"], 0, 2),
+        (["pushy", "pushy"], 1, 2),
+        (["pushy", "edited"], 1, 2),
+        (["edited", "clean"], 0, 2),
+        (["edited", "edited"], 1, 2),
+        (["down", "clean"], 0, 2),
+        (["down", "down"], 2, 2),
+        (["down", "edited"], 2, 2),
+        (["edited", "down"], 2, 2),
+        (["down", "pushy"], 2, 2),
+        # pi got no answer while the model answered a plain request, so the package may have broken pi's requests
+        (["broke", "broke"], 1, 2),
+        (["broke", "clean"], 0, 2),
+        (["broke", "down"], 2, 2),
+        (["broke", "pushy"], 1, 2),
+    ],
+)
+def test_the_question_is_asked_again_only_while_the_outcome_could_be_chance(
+    tmp_path, monkeypatch, capsys, outcomes: list[str], code: int, asked: int
+) -> None:
+    try_variant = _try_variant(monkeypatch=monkeypatch)
+    pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
+    read = _response(stop="toolUse", call="read")
+    answer = _response(stop="stop", text="Yes, through the end of that day.")
+    records = {
+        "clean": [read, answer],
+        "pushy": [read, answer, answer],
+        "edited": [read, answer],
+        "down": [],
+        "broke": [],
+    }
+    ran: list[str] = []
+
+    def run(package: Path, repo: Path, message: str, timeout: int) -> object:
+        outcome = outcomes[len(ran)]
+        ran.append(outcome)
+        events = _events(path=tmp_path / f"events-{len(ran)}.jsonl", records=records[outcome])
+        diff = "diff --git a/notes.md b/notes.md\n" if outcome == "edited" else ""
+        return try_variant.Tried(events=events, repo=tmp_path, diff=diff, finished=True)
+
+    monkeypatch.setattr(try_variant, "run", run)
+    monkeypatch.setattr(try_variant, "model_answers", lambda: ran[-1] == "broke")
+    monkeypatch.setattr(try_variant, "QUESTION", pi.PRACTICE_QUESTION)
+    assert try_variant.question(package=tmp_path, timeout=540, tries=2) == code
+    assert len(ran) == asked
+    printed = capsys.readouterr().out
+    assert ("\nunavailable: " in printed) == (code == 2)
+    if outcomes == ["broke", "broke"]:
+        assert "problem: pi got no response from the model, though the model answers a plain request" in printed
+
+
+def test_try_variant_stops_pi_when_it_is_stopped(tmp_path: Path) -> None:
+    # the bash tool's timeout sends SIGTERM to try-variant's process group, which pi isn't in
+    pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
+    fake = tmp_path / "bin" / "pi"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho $$ > '{tmp_path}/pi.pid'\nsleep 60 &\necho $! > '{tmp_path}/child.pid'\nwait\n")
+    fake.chmod(0o755)
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "models.json").write_text("{}")
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / "README.md").write_text("A small repo.\n")
+    (tmp_path / "task.md").write_text("What is this repo?\n")
+    argv = ["try-variant", str(pi.HARNESS.package_dir), str(tmp_path / "repo"), str(tmp_path / "task.md")]
+    script = (
+        "import sys\nfrom pathlib import Path\nimport try_variant\n"
+        f"try_variant.MODELS = Path({str(tmp_path / 'models')!r})\n"
+        f"try_variant.TRIES = Path({str(tmp_path / 'tries')!r})\n"
+        f"sys.exit(try_variant.main(argv={argv!r}))\n"
+    )
+    # PYTHONPATH stands in for the script's own folder, which python3 puts on the path in the container
+    env = {**os.environ, "PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}", "PYTHONPATH": str(pi.PI_DIR)}
+    proc = subprocess.Popen([sys.executable, "-c", script], env=env, stderr=subprocess.DEVNULL)
+    started = time.monotonic()
+    while not (tmp_path / "child.pid").is_file() or not (tmp_path / "child.pid").read_text().strip():
+        assert proc.poll() is None and time.monotonic() - started < 30
+        time.sleep(0.1)
+    pids = [int((tmp_path / name).read_text()) for name in ("pi.pid", "child.pid")]
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=15)
+
+    def gone(pid: int) -> bool:
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.1)
+        return False
+
+    assert all(gone(pid=pid) for pid in pids)
+
+
+def test_every_question_is_about_a_small_repo_that_needs_no_change() -> None:
+    pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
+    questions = sorted(d.name for d in pi.QUESTIONS_DIR.iterdir() if d.is_dir())
+    assert questions == ["javascript", "python"] and pi.PRACTICE_QUESTION.name == "javascript"
+    for name in questions:
+        question = pi.QUESTIONS_DIR / name
+        assert (question / "question.md").read_text().strip().endswith("?")
+        assert (question / "repo" / "README.md").is_file()
+    # npm install leaves a committed lockfile as it is, so a reflexive install changes nothing
+    assert (pi.PRACTICE_QUESTION / "repo" / "package-lock.json").is_file()
+
+
 def test_the_teacher_container_installs_both_helpers() -> None:
     pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
-    assert "check_variant.py --terms /opt/rsi/terms.txt" in pi.CHECK_COMMAND
+    assert "check_variant.py --terms /opt/rsi/terms.txt --manifest /opt/harness/package.json" in pi.CHECK_COMMAND
     assert "try_variant.py" in pi.TRY_COMMAND
     assert subprocess.run(["sh", "-n", "-c", pi.TRY_COMMAND], check=False).returncode == 0
 

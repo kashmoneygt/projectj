@@ -1,7 +1,7 @@
 {
-  "name": "@projectj/pi-baseline",
+  "name": "@projectj/pi-harness",
   "version": "0.1.0",
-  "description": "Project J RSI baseline: plain pi, nothing added; the evaluation instrumentation is runner-installed, outside this package",
+  "description": "Changes to pi that make it better at agentic coding",
   "keywords": [
     "pi-package"
   ],

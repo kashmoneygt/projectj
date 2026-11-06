@@ -21,10 +21,19 @@ def task_set(node: core.Node) -> tuple[str, ...]:
     return tuple(sorted(node.task_ids or node.runs))
 
 
-def _setup(node: core.Node) -> tuple:
-    """Settings runs must share to be compared, ignoring the port"""
-    model = json.dumps(node.model.model_dump(mode="json", exclude={"port"}), sort_keys=True)
-    return (model, node.harness, node.harness_version, node.dataset.name, node.dataset.revision, node.budget)
+def _settings(node: core.Node) -> dict[str, object]:
+    """What a run's numbers depend on besides its server, contract and package (the port doesn't count)"""
+    return {
+        "model settings": node.model.model_dump(mode="json", exclude={"port"}),
+        "harness": f"{node.harness} {node.harness_version}",
+        "dataset": node.dataset.model_dump(mode="json"),
+        "time budget": node.budget.model_dump(mode="json"),
+    }
+
+
+def _setup(node: core.Node) -> str:
+    """The settings runs must share to be compared, as one key"""
+    return json.dumps(_settings(node=node), sort_keys=True)
 
 
 def comparable(a: core.Node, b: core.Node) -> bool:
@@ -58,9 +67,9 @@ def reference_runs(parent: core.Node, tasks: tuple[str, ...], nodes: list[core.N
 
 
 def reference_run(child: core.Node, nodes: list[core.Node]) -> core.Node | None:
-    """The latest reference run, for one-line comparisons"""
+    """The latest reference run, for one-line comparisons (none if the child wasn't made like its parent)"""
     parent = next((n for n in nodes if n.name == child.parent), None)
-    if parent is None:
+    if parent is None or not comparable(a=child, b=parent):
         return None
     found = [n for n in reference_runs(parent=parent, tasks=task_set(node=child), nodes=nodes) if n.name != child.name]
     return max(found, key=lambda n: n.created, default=None)
@@ -77,8 +86,12 @@ def _differences(field: str, values: dict[str, object]) -> str:
 
 
 def made_differently(compared: list[core.Node], packages: list[list[core.Node]]) -> list[str]:
-    """Why these runs can't be compared (server, contract or package files differ)"""
+    """Why these runs can't be compared (settings, server, contract or package files differ)"""
     problems = [
+        _differences(field=field, values={n.name: _settings(node=n)[field] for n in compared})
+        for field in ("model settings", "harness", "dataset", "time budget")
+    ]
+    problems += [
         _differences(field="model server", values={n.name: n.server for n in compared}),
         _differences(field="harness contract", values={n.name: n.contract for n in compared}),
     ]
@@ -135,7 +148,7 @@ class Profile:
     """How a node's runs behaved, apart from the score"""
 
     capped: int  # runs whose last request hit the output cap
-    empty: int  # runs without a patch
+    empty: int  # runs that changed no file
     stopped: int  # runs that timed out or errored
     requests: float  # mean per task
     output_tokens: float  # mean per task
@@ -161,18 +174,17 @@ def profile(node: core.Node) -> Profile:
 
 
 def behavior_change(before: Profile, after: Profile) -> str:
-    """How behavior changed from the reference's runs to the child's"""
-    return ", ".join(
-        [
-            f"runs ending cut at the output cap {before.capped}→{after.capped}",
-            f"runs without a patch {before.empty}→{after.empty}",
-            f"timeouts/errors {before.stopped}→{after.stopped}",
-            f"requests/task {before.requests:.0f}→{after.requests:.0f}",
-            f"output tokens/task {before.output_tokens / 1000:.1f}k→{after.output_tokens / 1000:.1f}k",
-            f"thinking share {before.thinking:.0%}→{after.thinking:.0%}",
-            f"minutes/task {before.minutes:.1f}→{after.minutes:.1f}",
-        ]
-    )
+    """How behavior changed from the reference's runs to the child's, leaving out what didn't move"""
+    pairs = [
+        ("runs ending cut at the output cap", f"{before.capped}", f"{after.capped}"),
+        ("runs that changed no file", f"{before.empty}", f"{after.empty}"),
+        ("timeouts/errors", f"{before.stopped}", f"{after.stopped}"),
+        ("requests/task", f"{before.requests:.0f}", f"{after.requests:.0f}"),
+        ("output tokens/task", f"{before.output_tokens / 1000:.1f}k", f"{after.output_tokens / 1000:.1f}k"),
+        ("thinking share", f"{before.thinking:.0%}", f"{after.thinking:.0%}"),
+        ("minutes/task", f"{before.minutes:.1f}", f"{after.minutes:.1f}"),
+    ]
+    return ", ".join(f"{label} {old}→{new}" for label, old, new in pairs if old != new)
 
 
 def best_child(children: list[core.Node]) -> core.Node | None:

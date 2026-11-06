@@ -53,17 +53,21 @@ run; the workload is a probe, not the goal. Three kinds of change, in order of p
    harness is invalid.
 
 The runner catches the obvious cases: `rsi variants generate` rejects candidates whose agent-visible files name the
-workload or its protocol. The rest is up to the teacher and to the people reviewing.
+workload or its protocol. It also asks each candidate a question about a small repo that needs no change, and
+rejects one that changes the repo or keeps the agent going after it has answered: a one-shot run rewards pushing
+on, and a person who just asked would not. The rest is up to the teacher and to the people reviewing.
 
 ## Out of a variant's reach
 
 - **Model parameters**, everything `models.toml` pins (sampling, the context window, the values the chat template
-  reads such as thinking and its effort, the output cap). They belong to the model axis and stay fixed so generations
-  compare. How the model thinks within them is the harness's to change: what it's told, what it sees, and how long it
-  may think per request (a thinking budget, where the harness and server support one).
+  reads such as thinking and its effort, the output cap), and any cap on thinking. They belong to the model axis and
+  stay fixed so generations compare. How the model thinks within them is the harness's to change, through what it's
+  told and what it sees.
 - **The environment** (container, repo state, network): the benchmark protocol's.
+- **The task message**: the benchmark's, written the way a person would ask for the work. The harness adds nothing to
+  it, so it says nothing about how the work is judged.
 - **The evaluation contract**: the instrumentation (metrics that only read each request), the provider config and the
-  per-request output cap, the task rules, the per-task wall clock and the one-shot execution mode. The baseline is the
+  per-request output cap, the per-task wall clock and the one-shot execution mode. The baseline is the
   harness as it ships, with no turn limit and no settings of the runner's own. A run still going at the wall clock is
   stopped and scored on whatever the repo holds.
 
@@ -74,15 +78,14 @@ Each harness pins the contract as far as its extension model allows:
   the wall clock whatever the variant loads. pi's extension API can still reach the request
   (`before_provider_request`), the model and thinking level (`setModel`, `setThinkingLevel`, providers) and the
   instrumentation's environment, all in-process, so `check-variant` rejects packages that use those surfaces, and
-  `settings.json` only takes the keys about how the agent works and the display (no model, provider or thinking
-  level, no proxy, no code or files from outside the package). Every request is audited where it leaves the
-  container: the model proxy on the sandbox network logs each one's parameters (not its messages) and the usage the
-  server reports, and each task keeps its container's share in `requests.jsonl`. So nested calls
+  `settings.json` only takes the keys about how the agent works and the display (no model, provider, thinking
+  level or thinking budget, no proxy, no code or files from outside the package). Every request is audited where it
+  leaves the container: the model proxy on the sandbox network logs each one's parameters (not its messages) and the
+  usage the server reports, and each task keeps its container's share in `requests.jsonl`. So nested calls
   (`ctx.modelRegistry`) and second `pi` processes are checked against the pinned spec like the agent's own requests
   (`contract_violations` on each task, which also flags keys pi doesn't send) and count toward the task's requests and
-  tokens. A thinking budget goes through pi's own `thinkingBudgets` setting: the runner names the server's budget
-  field in `models.json` only for a variant whose `settings.json` sets `thinkingBudgets.medium`, the level runs think
-  at, so the baseline sends none, as plain pi does.
+  tokens. pi sends a thinking budget only when the provider config names the server's budget field, which the
+  runner's `models.json` never does, so no run has one, as with plain pi.
 - **deepseek-harness** (design): the runner mounts the instrumentation in a composition layer the variant's patches
   can't override (layers apply in a fixed order and the top one wins), and the composition is verified at boot.
 
