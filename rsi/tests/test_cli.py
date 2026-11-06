@@ -354,6 +354,20 @@ def _successor(tmp_path: Path, name: str, outcomes: list[bool], variant: str | N
     return node
 
 
+def _one_repo(node: core.Node) -> dict[str, str]:
+    """Every task of node in the same repo"""
+    return dict.fromkeys(node.runs, "r")
+
+
+def _made_up_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the benchmark take a test's made-up task ids, all in one repo"""
+
+    def by_ids(ids: list[str]) -> list[core.Instance]:
+        return [core.Instance(instance_id=i, repo="r", base_commit="c", task="p") for i in ids]
+
+    monkeypatch.setattr(benchmarks.get(name="swebench-verified"), "by_ids", by_ids)
+
+
 class _FakeBench:
     dataset = core.DatasetSpec(name="swebench-verified", dataset_id="princeton-nlp/SWE-bench_Verified")
 
@@ -712,6 +726,7 @@ def _scored_root() -> core.Node:
 
 def test_probe_set_is_fixed_by_the_lineage_root(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    _made_up_ids(monkeypatch=monkeypatch)
     _scored_root()
     child = _successor(tmp_path=tmp_path, name="v1", outcomes=[True])
     (tmp_path / "variants" / "v1").mkdir(parents=True)
@@ -751,6 +766,7 @@ def test_probe_set_is_fixed_by_the_lineage_root(tmp_path, monkeypatch) -> None:
 
 def test_the_probe_set_counts_older_runs_and_is_written_once(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    _made_up_ids(monkeypatch=monkeypatch)
     root = _parent_node()
     root.runs = {
         iid: core.TaskRun(instance_id=iid, status="ok", resolved=ok)
@@ -912,7 +928,7 @@ def _lineage(
     root.runs = {iid: core.TaskRun(instance_id=iid, status="ok", resolved=i >= 4) for i, iid in enumerate(tasks)}
     root.task_ids, root.tasks, root.total, root.resolved = tasks, 6, 6, 2
     runs.write_node(node=root)
-    return root, runs.write_probe(root=root, nodes=[root])
+    return root, runs.write_probe(root=root, nodes=[root], repos=_one_repo(node=root))
 
 
 def _probe_node(root: core.Node, probe: list[str], node: str, variant: str, seed: int) -> None:
@@ -993,14 +1009,14 @@ def test_a_baseline_probe_run_is_made_from_the_one_root_with_a_probe_set(
     runs.write_node(node=unprobed)
     other = root.model_copy(update={"name": "other-model", "model": root.model.model_copy(update={"name": "qwen"})})
     runs.write_node(node=other)
-    runs.write_probe(root=other, nodes=[other])
+    runs.write_probe(root=other, nodes=[other], repos=_one_repo(node=other))
     args = ["run", "--model", "gemma-4-12b", "--benchmark", "swebench-verified", "--probe", "--no-score"]
     result = _invoke(args=[*args, "--seed", "43"])
     assert result.exit_code == 0
     made = runs.read_node(name=f"gemma-4-12b--pi--swebench-verified--baseline--{len(probe)}t--s43")
     assert (made.parent, made.variant, made.tasks) == ("t-node", "", len(probe))
     assert started.ran == [(made.name, probe)] and started.scored == []
-    runs.write_probe(root=unprobed, nodes=[unprobed])
+    runs.write_probe(root=unprobed, nodes=[unprobed], repos=_one_repo(node=unprobed))
     result = _invoke(args=[*args, "--seed", "44"])
     assert result.exit_code == 1
     assert "and more than one (t-node, unprobed) of gemma-4-12b on swebench-verified has one" in result.output
@@ -1020,7 +1036,7 @@ def test_a_baseline_probe_run_leaves_out_roots_made_with_another_request(
     asked = root.dataset.model_copy(update={"request": "{task}"})
     older = root.model_copy(update={"name": "older", "seed": 2, "dataset": asked})
     runs.write_node(node=older)
-    runs.write_probe(root=older, nodes=[older])
+    runs.write_probe(root=older, nodes=[older], repos=_one_repo(node=older))
     args = ["run", "--model", "gemma-4-12b", "--benchmark", "swebench-verified", "--probe", "--no-score"]
     assert _invoke(args=[*args, "--seed", "43"]).exit_code == 0
     assert runs.read_node(name=started.ran[0][0]).parent == root.name

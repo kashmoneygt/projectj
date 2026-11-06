@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import random
 import shutil
 import subprocess
 import sys
@@ -120,13 +119,13 @@ class SweBenchVerified:
         tasks_repo(clone=clone)
 
     def select(self, tasks: int, seed: int) -> list[core.Instance]:
-        """A seeded sample of `tasks` rows (0 means all), the same on every machine"""
-        picked = benchmarks.rows(spec=self.dataset)
-        if 0 < tasks < len(picked):
-            shuffled = picked[:]
-            random.Random(seed).shuffle(shuffled)
-            picked = shuffled[:tasks]
-        return [_instance(row=row, request=self.dataset.request) for row in picked]
+        """A seeded sample of `tasks` rows spread across the repos (0 means all), the same on every machine"""
+        rows = {row["instance_id"]: row for row in benchmarks.rows(spec=self.dataset)}
+        ids = list(rows)
+        if 0 < tasks < len(ids):
+            repos = {iid: row["repo"] for iid, row in rows.items()}
+            ids = benchmarks.spread(ids=ids, repos=repos, count=tasks, seed=seed)
+        return [_instance(row=rows[iid], request=self.dataset.request) for iid in ids]
 
     def by_ids(self, ids: list[str]) -> list[core.Instance]:
         rows = {r["instance_id"]: r for r in benchmarks.rows(spec=self.dataset)}

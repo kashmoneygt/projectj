@@ -1,3 +1,5 @@
+from collections import Counter
+
 import pytest
 
 from rsi import benchmarks, core, folders, paths
@@ -53,3 +55,20 @@ def test_select_zero_and_oversize_returns_all(monkeypatch) -> None:
     bm = benchmarks.get(name="swebench-verified")
     assert len(bm.select(tasks=0, seed=1)) == 8
     assert len(bm.select(tasks=99, seed=1)) == 8
+
+
+def test_select_gives_each_repo_a_share_by_the_square_root_of_its_size(monkeypatch) -> None:
+    # one repo with 100 tasks and four with 4 each, like Django against the small ones
+    sizes = {"big": 100, "a": 4, "b": 4, "c": 4, "d": 4}
+    rows = [
+        {"instance_id": f"{repo}__{repo}-{i}", "repo": repo, "base_commit": "c", "problem_statement": "p"}
+        for repo, size in sizes.items()
+        for i in range(size)
+    ]
+    monkeypatch.setattr(benchmarks, "rows", lambda spec: rows)
+    bm = benchmarks.get(name="swebench-verified")
+    picked = Counter(i.repo for i in bm.select(tasks=20, seed=3))
+    # shares of 20 by the square root of each size: 11.1 for big and 2.2 for each small repo, the last task going to
+    # the repo furthest under its share. By size alone big would get 17 and each small one less than one
+    assert picked["big"] == 11 and sorted(picked[r] for r in "abcd") == [2, 2, 2, 3]
+    assert [i.instance_id for i in bm.select(tasks=20, seed=3)] == [i.instance_id for i in bm.select(tasks=20, seed=3)]

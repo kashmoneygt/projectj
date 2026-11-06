@@ -459,7 +459,9 @@ def images_build(
     tasks: int = typer.Option(0, "--tasks", help="Number of tasks (0 for all)"),
     seed: int = typer.Option(42, "--seed"),
     instances_file: str = typer.Option("", "--instances", help="File of task ids, one per line (overrides --tasks)"),
-    n_concurrent: int = typer.Option(4, "--n-concurrent"),
+    n_concurrent: int = typer.Option(
+        1, "--n-concurrent", help="Images built at once (a task's conda build can take most of Docker's memory)"
+    ),
     clone_tasks: bool = typer.Option(False, "--clone-tasks"),
 ) -> None:
     """Build the task images and harness overlays a run needs"""
@@ -719,14 +721,18 @@ def probe_command(
             _stop(reason=str(exc))
     else:
         for folder in history or []:
-            found = runs.nodes_in(folder=Path(folder).expanduser())
+            found, unread = runs.history_in(folder=Path(folder).expanduser())
             if not found:
-                _stop(reason=f"no node records (*/node.json) under {folder}")
+                _stop(reason=f"no node records (*/node.json) this code can read under {folder}")
             log.info(f"counting {len(found)} runs from {folder}")
+            if unread:
+                log.warning(f"left out {len(unread)} runs whose records are in an older format: {', '.join(unread)}")
             nodes += found
         # don't count the same run twice
         unique = list({(n.name, n.created): n for n in nodes}.values())
-        tasks = runs.write_probe(root=record, nodes=unique)
+        instances = benchmarks.get(name=record.dataset.name).by_ids(ids=sorted(record.runs))
+        repos = {instance.instance_id: instance.repo for instance in instances}
+        tasks = runs.write_probe(root=record, nodes=unique, repos=repos)
     log.info(f"probe set of {record.name}: {len(tasks)} tasks, written to {path}")
     hidden = runs.lineage_hidden(root=record)
     log.info(f"the teacher never sees {len(hidden)} of them, listed in {runs.hidden_path(root=record)}")

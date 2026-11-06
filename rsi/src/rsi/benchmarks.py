@@ -1,3 +1,5 @@
+import math
+import random
 from pathlib import Path
 from typing import Protocol
 
@@ -39,6 +41,26 @@ class Benchmark(Protocol):
 
 def rows(spec: core.DatasetSpec) -> list[dict]:
     return list(datasets.load_dataset(spec.dataset_id, split=spec.split, revision=spec.revision or None))
+
+
+def spread(ids: list[str], repos: dict[str, str], count: int, seed: int) -> list[str]:
+    """A seeded sample of count tasks, each repo's share by the square root of its size so none crowds out the rest"""
+    shuffled = ids[:]
+    random.Random(seed).shuffle(shuffled)
+    if count >= len(shuffled):
+        return shuffled
+    by_repo: dict[str, list[str]] = {}
+    for iid in shuffled:
+        by_repo.setdefault(repos[iid], []).append(iid)
+    weights = {repo: math.sqrt(len(found)) for repo, found in by_repo.items()}
+    shares = {repo: count * weight / sum(weights.values()) for repo, weight in weights.items()}
+    taken = {repo: min(int(share), len(by_repo[repo])) for repo, share in shares.items()}
+    while sum(taken.values()) < count:
+        # the rest go to the repos furthest under their share, among those with tasks left
+        repo = max((r for r in by_repo if taken[r] < len(by_repo[r])), key=lambda r: shares[r] - taken[r])
+        taken[repo] += 1
+    picked = {iid for repo, found in by_repo.items() for iid in found[: taken[repo]]}
+    return [iid for iid in shuffled if iid in picked]
 
 
 def banned_terms(benchmark: Benchmark) -> tuple[str, ...]:
