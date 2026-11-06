@@ -30,6 +30,7 @@ class ModelSpec(Frozen):
     port: int = 11500
     ctx: int = 32768  # context window (input + output)
     parallel: int = 1  # requests the server runs at once
+    memory_gb: int = 0  # the server's memory cap, 0 = none
     seed: int = 42  # sampling seed
     thinking: bool = False  # thinking mode
     max_output_tokens: int = 0  # per response, 0 = the rest of the context window

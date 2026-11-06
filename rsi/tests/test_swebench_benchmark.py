@@ -31,7 +31,7 @@ def test_report_path_and_read(tmp_path: Path) -> None:
     assert slash.name == "org__model.node-a.json"
 
 
-def test_by_ids(monkeypatch) -> None:
+def test_by_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [
         {"instance_id": "a__b-1", "repo": "r1", "base_commit": "c1", "problem_statement": "p1"},
         {"instance_id": "c__d-2", "repo": "r2", "base_commit": "c2", "problem_statement": "p2"},
@@ -45,7 +45,7 @@ def test_by_ids(monkeypatch) -> None:
         mod.BENCHMARK.by_ids(ids=["x__y-9"])
 
 
-def test_command_args(tmp_path: Path, monkeypatch) -> None:
+def test_command_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     repo = _tasks_repo(root=tmp_path)
     calls: list[list[str]] = []
@@ -61,7 +61,7 @@ def test_command_args(tmp_path: Path, monkeypatch) -> None:
     assert calls[-1][calls[-1].index("--task-repo") + 1] == str(repo)
 
 
-def test_tasks_repo_clone_flag(tmp_path: Path, monkeypatch) -> None:
+def test_tasks_repo_clone_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     with pytest.raises(FileNotFoundError, match="--clone-tasks"):
         mod.BENCHMARK.ensure_assets(clone=False)
@@ -75,7 +75,7 @@ def test_tasks_repo_clone_flag(tmp_path: Path, monkeypatch) -> None:
     assert mod.tasks_repo(clone=False) == repo
 
 
-def test_score_persists_report(tmp_path: Path, monkeypatch) -> None:
+def test_score_persists_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     repo = _tasks_repo(root=tmp_path)
     calls: list[list[str]] = []
@@ -117,7 +117,7 @@ def test_persist_eval_artifacts(tmp_path: Path) -> None:
     assert mod.persist_eval_artifacts(src=tmp_path / "missing", instances_dir=instances_dir) == 0
 
 
-def test_eval_builds_only_the_missing_images(monkeypatch) -> None:
+def test_eval_builds_only_the_missing_images(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
 
     def fake_build(

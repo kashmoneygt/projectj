@@ -78,7 +78,7 @@ def test_splash_requires_splash_source() -> None:
             models.make_backend(spec=_spec(source=bad))
 
 
-def test_splash_command_and_urls(tmp_path, monkeypatch) -> None:
+def test_splash_command_and_urls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     monkeypatch.setenv("RSI_SPLASH_BIN", "splash")
     server = models.make_backend(spec=_spec())
@@ -111,7 +111,15 @@ def test_splash_command_and_urls(tmp_path, monkeypatch) -> None:
     assert server.log_stats() is None
 
 
-def test_splash_ready_status_and_wait(tmp_path, monkeypatch) -> None:
+def test_splash_caps_its_memory_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    monkeypatch.setenv("RSI_SPLASH_BIN", "splash")
+    capped = models.make_backend(spec=_spec().model_copy(update={"memory_gb": 24}))
+    assert capped._cmd()[-2:] == ["--max-memory", "24G"]
+    assert "--max-memory" not in models.make_backend(spec=_spec())._cmd()
+
+
+def test_splash_ready_status_and_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     monkeypatch.setenv("RSI_SPLASH_BIN", "echo")
     port = _free_port()
@@ -133,7 +141,7 @@ def test_splash_ready_status_and_wait(tmp_path, monkeypatch) -> None:
     assert server.is_running() is False
 
 
-def test_splash_start_leaves_out_request_defaults(tmp_path, monkeypatch) -> None:
+def test_splash_start_leaves_out_request_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     monkeypatch.setenv("RSI_SPLASH_BIN", "splash")
     monkeypatch.setenv("SPLASH_THINKING_TOKEN_BUDGET", "300")
@@ -157,7 +165,9 @@ def test_splash_start_leaves_out_request_defaults(tmp_path, monkeypatch) -> None
     assert envs[0]["HF_HOME"] == "/tmp/hf"
 
 
-def test_splash_wait_ready_stops_a_server_with_a_smaller_window(tmp_path, monkeypatch) -> None:
+def test_splash_wait_ready_stops_a_server_with_a_smaller_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     port = _free_port()
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _FakeSplash)
@@ -173,7 +183,7 @@ def test_splash_wait_ready_stops_a_server_with_a_smaller_window(tmp_path, monkey
     assert stopped == [True]
 
 
-def test_splash_stop_kills_process_group(tmp_path, monkeypatch) -> None:
+def test_splash_stop_kills_process_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     server = models.make_backend(spec=_spec())
     proc = subprocess.Popen(["sleep", "30"], start_new_session=True)

@@ -46,6 +46,21 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def _started_at(pid: int) -> float | None:
+    # strptime reads English day and month names
+    found = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    try:
+        return time.mktime(time.strptime(found.stdout.strip(), "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return None
+
+
 class LocalServer:
     """Shared base for model servers on the host machine"""
 
@@ -105,24 +120,28 @@ class LocalServer:
                     )
             else:
                 # started by an earlier `models up`, so only its pid is known
-                pid = self._pid()
-                if pid is None or not pid_alive(pid=pid):
+                if self._pid() is None:
                     raise RuntimeError(f"{self.program} for {self.spec.name} died while starting; see {self.log_path}")
             time.sleep(2)
         raise TimeoutError(f"{self.program} for {self.spec.name} not ready after {timeout:.0f}s")
 
     def _pid(self) -> int | None:
-        if not self.pid_path.exists():
-            return None
+        """The pid an earlier `models up` saved, if that server still runs"""
         try:
-            return int(self.pid_path.read_text().strip())
-        except ValueError:
+            written = self.pid_path.stat().st_mtime
+            pid = int(self.pid_path.read_text().strip())
+        except (FileNotFoundError, ValueError):
             return None
+        started = _started_at(pid=pid)
+        # after a reboot, the pid can belong to a newer process
+        if started is None or started > written:
+            return None
+        return pid
 
     def _starting(self) -> bool:
         """Check if an earlier `models up` is still loading the model"""
         pid = self._pid()
-        if pid is None or not pid_alive(pid=pid):
+        if pid is None:
             return False
         log.info(f"{self.program} already starting (pid {pid}); waiting for readiness")
         return True

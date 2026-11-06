@@ -249,7 +249,7 @@ def test_a_teacher_or_model_that_is_down_stops_the_round_with_its_reason_logged(
     assert stopped.value.exit_code == 1 and str(down) in caplog.text
 
 
-def test_make_node_records_what_made_its_runs(tmp_path, monkeypatch) -> None:
+def test_make_node_records_what_made_its_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     parent = _parent_node()
     parent.total = 1
@@ -390,7 +390,7 @@ def _empty_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ids: list[str])
     return node
 
 
-def test_run_tasks_records_task_set(tmp_path, monkeypatch) -> None:
+def test_run_tasks_records_task_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     node = _empty_node(tmp_path=tmp_path, monkeypatch=monkeypatch, ids=["a__b-1"])
     cli.run_tasks(node=node, h=_FakeHarness(), backend=_FakeBackend(), n_concurrent=1)
     stored = runs.read_node(name=node.name)
@@ -398,7 +398,9 @@ def test_run_tasks_records_task_set(tmp_path, monkeypatch) -> None:
     assert stored.runs["a__b-1"].status == "ok"
 
 
-def test_run_tasks_runs_as_many_at_once_as_the_model_is_served_for(tmp_path, monkeypatch) -> None:
+def test_run_tasks_runs_as_many_at_once_as_the_model_is_served_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     node = _empty_node(tmp_path=tmp_path, monkeypatch=monkeypatch, ids=["a__b-1"])
     node.model = node.model.model_copy(update={"parallel": 2})
     widths: list[int] = []
@@ -408,7 +410,7 @@ def test_run_tasks_runs_as_many_at_once_as_the_model_is_served_for(tmp_path, mon
     assert widths == [2, 1, 2]
 
 
-def test_run_tasks_uses_explicit_instance_set(tmp_path, monkeypatch) -> None:
+def test_run_tasks_uses_explicit_instance_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     node = _empty_node(tmp_path=tmp_path, monkeypatch=monkeypatch, ids=["a__b-1", "c__d-2"])
     cli.run_tasks(
         node=node, h=_FakeHarness(), backend=_FakeBackend(), n_concurrent=1, instance_ids=["c__d-2", "a__b-1"]
@@ -418,7 +420,7 @@ def test_run_tasks_uses_explicit_instance_set(tmp_path, monkeypatch) -> None:
     assert set(stored.runs) == {"c__d-2", "a__b-1"}
 
 
-def test_a_timeout_while_the_server_answers_stays_a_timeout(tmp_path, monkeypatch) -> None:
+def test_a_timeout_while_the_server_answers_stays_a_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     node = _empty_node(tmp_path=tmp_path, monkeypatch=monkeypatch, ids=["a__b-1", "c__d-2"])
     slow = core.TaskRun(instance_id="a__b-1", status="timeout", patch="+x", metrics=core.TaskMetrics(requests=40))
     backend = _FakeBackend()
@@ -475,7 +477,7 @@ def test_errors_after_the_run_got_going_dont_stop_it(tmp_path: Path, monkeypatch
     assert [stored.runs[iid].status for iid in ids] == ["ok", "error", "error", "error", "error"]
 
 
-def test_read_instance_ids(tmp_path) -> None:
+def test_read_instance_ids(tmp_path: Path) -> None:
     good = tmp_path / "ids.txt"
     good.write_text("# a comment\na__b-1\n\nc__d-2\n")
     assert cli._read_instance_ids(text_file=str(good)) == ["a__b-1", "c__d-2"]
@@ -489,7 +491,7 @@ def test_read_instance_ids(tmp_path) -> None:
         cli._read_instance_ids(text_file=str(dup))
 
 
-def test_run_tasks_rejects_drifted_task_set(tmp_path, monkeypatch) -> None:
+def test_run_tasks_rejects_drifted_task_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     node = _empty_node(tmp_path=tmp_path, monkeypatch=monkeypatch, ids=["a__b-1"])
     node.task_ids = ["z__z-9"]
     runs.write_node(node=node)
@@ -521,7 +523,9 @@ class _FlakyGrader:
 
 
 @pytest.mark.parametrize("fails", [1, 2])
-def test_scoring_grades_a_failed_evaluation_once_more(tmp_path, monkeypatch, caplog, fails) -> None:
+def test_scoring_grades_a_failed_evaluation_once_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fails: int
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     node = _parent_node()
     node.runs = {iid: core.TaskRun(instance_id=iid, status="ok", patch="+x") for iid in ("a__b-1", "c__d-2", "e__f-3")}
@@ -685,7 +689,7 @@ def test_the_baseline_needs_a_model_and_a_benchmark(tmp_path: Path, monkeypatch:
         assert result.exit_code == 1 and "the baseline needs --model and --benchmark" in result.output
 
 
-def test_run_probe_requires_scored_parent(tmp_path, monkeypatch) -> None:
+def test_run_probe_requires_scored_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     runs.write_node(node=_parent_node())
     (tmp_path / "variants" / "probe-v").mkdir(parents=True)
@@ -724,7 +728,7 @@ def _scored_root() -> core.Node:
     return root
 
 
-def test_probe_set_is_fixed_by_the_lineage_root(tmp_path, monkeypatch) -> None:
+def test_probe_set_is_fixed_by_the_lineage_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     _made_up_ids(monkeypatch=monkeypatch)
     _scored_root()
@@ -764,7 +768,7 @@ def test_probe_set_is_fixed_by_the_lineage_root(tmp_path, monkeypatch) -> None:
     assert created.parent == child.name and created.tasks == 3 and created.server == SERVER
 
 
-def test_the_probe_set_counts_older_runs_and_is_written_once(tmp_path, monkeypatch) -> None:
+def test_the_probe_set_counts_older_runs_and_is_written_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     _made_up_ids(monkeypatch=monkeypatch)
     root = _parent_node()
@@ -795,7 +799,7 @@ def test_the_probe_set_counts_older_runs_and_is_written_once(tmp_path, monkeypat
     assert result.exit_code == 1 and "written already" in result.output
 
 
-def test_the_probe_set_can_be_carried_over_as_given(tmp_path, monkeypatch) -> None:
+def test_the_probe_set_can_be_carried_over_as_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     root = _parent_node()
     root.runs = {iid: core.TaskRun(instance_id=iid, status="ok", resolved=True) for iid in ("a-1", "b-2", "c-3")}
@@ -811,7 +815,7 @@ def test_the_probe_set_can_be_carried_over_as_given(tmp_path, monkeypatch) -> No
     assert runs.lineage_probe(root=root) == ["a-1", "b-2"] and runs.lineage_hidden(root=root) == {"b-2"}
 
 
-def test_run_variant_not_in_tree_refused(tmp_path, monkeypatch) -> None:
+def test_run_variant_not_in_tree_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     (tmp_path / "variants" / "stray").mkdir(parents=True)
     args = [
@@ -834,7 +838,7 @@ def test_run_variant_not_in_tree_refused(tmp_path, monkeypatch) -> None:
     assert "not in the tree" in result.output
 
 
-def test_make_node_rejects_overlong_name(caplog) -> None:
+def test_make_node_rejects_overlong_name(caplog: pytest.LogCaptureFixture) -> None:
     with pytest.raises(typer.Exit):
         cli.make_node(
             name="a" * 201,
@@ -849,7 +853,7 @@ def test_make_node_rejects_overlong_name(caplog) -> None:
     assert "under 200" in caplog.text
 
 
-def test_cli_logs_to_file(tmp_path, monkeypatch) -> None:
+def test_cli_logs_to_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     root = logging.getLogger()
     before = list(root.handlers)
@@ -861,7 +865,7 @@ def test_cli_logs_to_file(tmp_path, monkeypatch) -> None:
         root.handlers[:] = before
 
 
-def test_node_commands_log_into_node_folder(tmp_path, monkeypatch) -> None:
+def test_node_commands_log_into_node_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     cli._retarget_logs(node_name="t-node")
     expected = tmp_path / "runs" / "t-node" / "rsi.log"
@@ -888,7 +892,12 @@ def test_one_process_at_a_time_uses_a_model(
         pass
 
 
-def test_compare_pools_two_sets_of_runs_on_the_tasks_they_share(tmp_path, monkeypatch, capsys, caplog) -> None:
+def test_compare_pools_two_sets_of_runs_on_the_tasks_they_share(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     tasks = [f"t__t-{i}" for i in range(4)]
 

@@ -31,7 +31,7 @@ def test_verified_benchmark_is_pinned() -> None:
     assert len(bm.dataset.revision) == 40
 
 
-def test_select_is_deterministic_and_random(monkeypatch) -> None:
+def test_select_is_deterministic_and_random(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [
         {"instance_id": f"repo__repo-{i}", "repo": f"repo{i % 5}", "base_commit": "abc", "problem_statement": "p"}
         for i in range(50)
@@ -49,7 +49,7 @@ def test_select_is_deterministic_and_random(monkeypatch) -> None:
         assert instance.instance_id and instance.repo and instance.task
 
 
-def test_select_zero_and_oversize_returns_all(monkeypatch) -> None:
+def test_select_zero_and_oversize_returns_all(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [{"instance_id": f"r__r-{i}", "repo": "r", "base_commit": "c", "problem_statement": "p"} for i in range(8)]
     monkeypatch.setattr(benchmarks, "rows", lambda spec: rows)
     bm = benchmarks.get(name="swebench-verified")
@@ -57,7 +57,7 @@ def test_select_zero_and_oversize_returns_all(monkeypatch) -> None:
     assert len(bm.select(tasks=99, seed=1)) == 8
 
 
-def test_select_gives_each_repo_a_share_by_the_square_root_of_its_size(monkeypatch) -> None:
+def test_select_gives_each_repo_a_share_by_the_square_root_of_its_size(monkeypatch: pytest.MonkeyPatch) -> None:
     # one repo with 100 tasks and four with 4 each, like Django against the small ones
     sizes = {"big": 100, "a": 4, "b": 4, "c": 4, "d": 4}
     rows = [

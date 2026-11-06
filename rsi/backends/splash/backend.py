@@ -64,6 +64,7 @@ class SplashServer(models.LocalServer):
             "--no-webui",
             "--idle-release",
             "off",
+            *(["--max-memory", f"{self.spec.memory_gb}G"] if self.spec.memory_gb else []),
         ]
 
     def start(self) -> None:
@@ -82,19 +83,19 @@ class SplashServer(models.LocalServer):
             return json.loads(resp.read())
 
     def _check_window(self) -> None:
-        # --max-context can only lower the window splash picks, so check it
+        # --max-context and --max-memory can only lower the window splash picks, so check it
         window = self._status(timeout=5).get("maximum_context_tokens")
         if window != self.spec.ctx:
             self.stop()
             raise RuntimeError(
                 f"splash ran {self.spec.name} with a {window}-token window, not the {self.spec.ctx} in models.toml, "
-                "so we stopped it. Lower ctx to what this machine can hold"
+                "so we stopped it. Lower ctx, or raise memory_gb, to what this machine can hold"
             )
 
     def stop(self) -> None:
         # the pid is the session leader, so killpg stops the whole tree
         pid = self._pid()
-        if pid is not None and models.pid_alive(pid=pid):
+        if pid is not None:
             try:
                 os.killpg(pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):

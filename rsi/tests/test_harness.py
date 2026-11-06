@@ -30,7 +30,7 @@ def test_pi_package_manifest() -> None:
     assert not (h.package_dir / "prompts").exists()
 
 
-def test_pi_install_extensions(tmp_path) -> None:
+def test_pi_install_extensions(tmp_path: Path) -> None:
     source = tmp_path / "eval"
     source.mkdir()
     (source / "metrics.ts").write_text("metrics")
@@ -50,7 +50,7 @@ def test_pi_timeout_saves_the_diff_a_finished_run_gets() -> None:
     assert calls == [["bash", "-lc", pi.CAPTURE_PATCH]]
 
 
-def test_pi_patch_keeps_new_and_binary_files(tmp_path) -> None:
+def test_pi_patch_keeps_new_and_binary_files(tmp_path: Path) -> None:
     repo, out = tmp_path / "testbed", tmp_path / "out"
     out.mkdir()
     git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
@@ -79,7 +79,7 @@ def test_pi_patch_keeps_new_and_binary_files(tmp_path) -> None:
     assert "index.lock" in (out / pi.STAGING_FAILED).read_text()
 
 
-def test_pi_patch_ignores_the_git_config_an_agent_sets(tmp_path) -> None:
+def test_pi_patch_ignores_the_git_config_an_agent_sets(tmp_path: Path) -> None:
     repo, out = tmp_path / "testbed", tmp_path / "out"
     out.mkdir()
     git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
@@ -167,7 +167,7 @@ def test_pi_check_model() -> None:
     assert "thinking off" in pi.HARNESS.check_model(model=off)
 
 
-def test_pi_task_prompt_is_the_task_as_given(tmp_path) -> None:
+def test_pi_task_prompt_is_the_task_as_given(tmp_path: Path) -> None:
     h = harness.load(name="pi")
     instance = core.Instance(
         instance_id="a__b-1", repo="a/b", base_commit="c", task="Please resolve this issue:\n\nIt breaks"
@@ -175,7 +175,7 @@ def test_pi_task_prompt_is_the_task_as_given(tmp_path) -> None:
     assert h.task_prompt(instance=instance) == "Please resolve this issue:\n\nIt breaks"
 
 
-def test_pi_copy_variant_resources(tmp_path) -> None:
+def test_pi_copy_variant_resources(tmp_path: Path) -> None:
     package = tmp_path / "pkg"
     (package / "agents").mkdir(parents=True)
     (package / "settings.json").write_text('{"defaultTools": ["+grep"]}')
@@ -199,7 +199,7 @@ def test_pi_copy_variant_resources(tmp_path) -> None:
     assert list(bare_agent.iterdir()) == []
 
 
-def test_pi_stage_runtime_package(tmp_path) -> None:
+def test_pi_stage_runtime_package(tmp_path: Path) -> None:
     package = tmp_path / "child"
     (package / "extensions").mkdir(parents=True)
     (package / "skills" / "verify").mkdir(parents=True)
@@ -313,7 +313,9 @@ class _CheckContainers:
         ("interrupt", "KeyboardInterrupt"),
     ],
 )
-def test_pi_check_reads_how_its_container_ended(tmp_path, monkeypatch, ends: str, found: tuple[int, str] | str) -> None:
+def test_pi_check_reads_how_its_container_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ends: str, found: tuple[int, str] | str
+) -> None:
     removed: list[bool] = []
     container = None if ends == "docker" else _CheckContainer(ends=ends, removed=removed)
 
@@ -339,7 +341,9 @@ def test_pi_check_reads_how_its_container_ended(tmp_path, monkeypatch, ends: str
     assert log_path.is_file() == (container is not None)
 
 
-def test_pi_question_check_asks_each_question_until_one_has_problems(tmp_path, monkeypatch) -> None:
+def test_pi_question_check_asks_each_question_until_one_has_problems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     asked: list[tuple[str, list[str], int]] = []
     printed = {"javascript": "ok: fine\n", "python": "problem: the run changed shipping.py\n"}
 
@@ -379,7 +383,7 @@ def test_pi_question_check_asks_each_question_until_one_has_problems(tmp_path, m
     assert [question for question, _, _ in asked] == ["javascript"]
 
 
-def test_pi_contract_digest(tmp_path) -> None:
+def test_pi_contract_digest(tmp_path: Path) -> None:
     (tmp_path / "eval").mkdir()
     (tmp_path / "package").mkdir()
     (tmp_path / "eval" / "metrics.ts").write_text("metrics")

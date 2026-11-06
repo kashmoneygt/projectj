@@ -57,7 +57,7 @@ def test_parse_takes_a_card_in_any_shape() -> None:
     assert cards.parse(text=f"{'word ' * 40}\n", title_max=None).title == ("word " * 40).strip()
 
 
-def test_check_and_read(tmp_path) -> None:
+def test_check_and_read(tmp_path: Path) -> None:
     assert cards.check(package=tmp_path) == ["VARIANT.md is missing: write the card before handing the variant in"]
     assert cards.read(package=tmp_path) is None
     (tmp_path / cards.FILE).write_text("\n\n")
@@ -71,7 +71,7 @@ def test_check_and_read(tmp_path) -> None:
     assert cards.read(package=package).title == "act sooner"
 
 
-def test_runs_alone_as_the_card_check_in_the_teacher_container(tmp_path) -> None:
+def test_runs_alone_as_the_card_check_in_the_teacher_container(tmp_path: Path) -> None:
     # -I -S hides site-packages, like the teacher's container
     def run(package: Path) -> subprocess.CompletedProcess[str]:
         command = [sys.executable, "-I", "-S", cards.__file__, str(package)]

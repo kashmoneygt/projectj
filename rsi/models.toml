@@ -22,6 +22,7 @@ backend = "splash"
 port = 11501
 ctx = 131072 # typical context window size for Mac Studio 36 GB, common graphics cards (RTX 3080+), etc.
 parallel = 2 # two tasks at a time
+memory_gb = 24 # splash otherwise fills all spare memory
 seed = 42  # splash takes no seed
 thinking = true
 max_output_tokens = 0

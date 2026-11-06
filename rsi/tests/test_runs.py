@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pydantic
 import pytest
@@ -19,7 +20,7 @@ def _node() -> core.Node:
     )
 
 
-def test_node_roundtrip_and_list(tmp_path, monkeypatch) -> None:
+def test_node_roundtrip_and_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     node = _node()
     runs.write_node(node=node)
@@ -28,7 +29,7 @@ def test_node_roundtrip_and_list(tmp_path, monkeypatch) -> None:
     assert names == ["t-node"]
 
 
-def test_record_task_run_and_apply_score(tmp_path, monkeypatch) -> None:
+def test_record_task_run_and_apply_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     node = _node()
     runs.write_node(node=node)
@@ -43,7 +44,7 @@ def test_record_task_run_and_apply_score(tmp_path, monkeypatch) -> None:
     assert runs.read_node(name="t-node").score == 50.0
 
 
-def test_write_preds(tmp_path, monkeypatch) -> None:
+def test_write_preds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     runs.write_preds(
         path=tmp_path / "preds.json",
@@ -60,7 +61,9 @@ def test_write_preds(tmp_path, monkeypatch) -> None:
     assert data["c__d-2"]["model_patch"] == ""
 
 
-def test_history_reads_an_archive_and_says_which_records_it_cant(tmp_path, monkeypatch) -> None:
+def test_history_reads_an_archive_and_says_which_records_it_cant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     runs.write_node(node=_node())
     (tmp_path / "runs" / "gold").mkdir()
@@ -88,7 +91,7 @@ def _repos(node: core.Node) -> dict[str, str]:
     return {iid: iid.split("-")[0] for iid in node.runs}
 
 
-def test_probe_is_the_failures_plus_sampled_successes(tmp_path, monkeypatch) -> None:
+def test_probe_is_the_failures_plus_sampled_successes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     monkeypatch.setattr(runs, "PROBE_SUCCESSES", 2)
     root = _scored(name="root", outcomes={"a__b-1": False, "b__c-2": True, "c__d-3": True, "d__e-4": True})
@@ -99,7 +102,7 @@ def test_probe_is_the_failures_plus_sampled_successes(tmp_path, monkeypatch) -> 
     assert runs.write_probe(root=root, nodes=[root], repos=_repos(node=root)) == probe
 
 
-def test_probe_leaves_out_tasks_the_model_never_solves(tmp_path, monkeypatch) -> None:
+def test_probe_leaves_out_tasks_the_model_never_solves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     root = _scored(name="root", outcomes={"hard-1": False, "flip-2": False, "easy-3": True})
     history = [_scored(name=f"run-{i}", outcomes={"hard-1": False, "flip-2": i == 0}) for i in range(8)]
@@ -115,7 +118,7 @@ def test_probe_leaves_out_tasks_the_model_never_solves(tmp_path, monkeypatch) ->
     assert runs.lineage_probe(root=root) == ["flip-2", "easy-3"]
 
 
-def test_a_lineage_without_a_probe_set_says_how_to_write_it(tmp_path, monkeypatch) -> None:
+def test_a_lineage_without_a_probe_set_says_how_to_write_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     root = _scored(name="root", outcomes={"a__b-1": False})
     with pytest.raises(FileNotFoundError, match="`rsi probe --root root"):
@@ -123,7 +126,7 @@ def test_a_lineage_without_a_probe_set_says_how_to_write_it(tmp_path, monkeypatc
     assert not (paths.node_dir(name="root") / "probe.txt").exists()
 
 
-def test_a_probe_set_picked_elsewhere_is_kept_as_given(tmp_path, monkeypatch) -> None:
+def test_a_probe_set_picked_elsewhere_is_kept_as_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     root = _scored(name="root", outcomes={"a-1": True, "b-2": False, "c-3": True})
     with pytest.raises(ValueError, match="didn't run 1 of these tasks: z-9"):
@@ -137,7 +140,9 @@ def test_a_probe_set_picked_elsewhere_is_kept_as_given(tmp_path, monkeypatch) ->
     assert "# picked before this lineage started\n" in runs.probe_path(root=root).read_text()
 
 
-def test_the_probe_hides_half_its_failures_and_half_its_successes(tmp_path, monkeypatch) -> None:
+def test_the_probe_hides_half_its_failures_and_half_its_successes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     monkeypatch.setattr(runs, "PROBE_SUCCESSES", 4)
     passed = [f"pass-{i}" for i in range(6)]
@@ -154,7 +159,9 @@ def test_the_probe_hides_half_its_failures_and_half_its_successes(tmp_path, monk
     assert runs.lineage_hidden(root=root) == hidden
 
 
-def test_the_probe_spreads_its_successes_and_hidden_half_across_the_repos(tmp_path, monkeypatch) -> None:
+def test_the_probe_spreads_its_successes_and_hidden_half_across_the_repos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     monkeypatch.setattr(runs, "PROBE_SUCCESSES", 8)
     # one big repo that passes a lot, and three small ones, like Django against the rest

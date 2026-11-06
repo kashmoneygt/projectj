@@ -22,7 +22,7 @@ def _package(tmp_path: Path) -> Path:
     return package
 
 
-def test_check_accepts_the_baseline_shape(tmp_path) -> None:
+def test_check_accepts_the_baseline_shape(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     (package / "SYSTEM.md").write_text("You fix bugs in large codebases.\n")
     (package / "APPEND_SYSTEM.md").write_text("Verify before you finish.\n")
@@ -52,7 +52,7 @@ def test_check_accepts_the_baseline_shape(tmp_path) -> None:
     assert pi.check.static_problems(package=package) == []
 
 
-def test_check_reports_a_changed_manifest(tmp_path) -> None:
+def test_check_reports_a_changed_manifest(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     baseline = pi.HARNESS.package_dir / "package.json"
     assert pi.check.static_problems(package=package, manifest=baseline) == []
@@ -63,7 +63,7 @@ def test_check_reports_a_changed_manifest(tmp_path) -> None:
     ]
 
 
-def test_check_reports_files_that_never_reach_the_agent(tmp_path) -> None:
+def test_check_reports_files_that_never_reach_the_agent(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     (package / "prompts").mkdir()
     (package / "prompts" / "system.md").write_text("never staged\n")
@@ -77,7 +77,7 @@ def test_check_reports_files_that_never_reach_the_agent(tmp_path) -> None:
     assert any(p.startswith("tools/search.ts never reaches the agent") for p in problems)
 
 
-def test_check_reports_manifest_mistakes(tmp_path) -> None:
+def test_check_reports_manifest_mistakes(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     (package / "extensions" / "guard.ts").write_text("export default function guard(pi) {}\n")
     (package / "package.json").write_text(
@@ -94,7 +94,7 @@ def test_check_reports_manifest_mistakes(tmp_path) -> None:
     assert pi.check.static_problems(package=package)[0].startswith("package.json is not valid JSON")
 
 
-def test_loaded_extensions_follow_pi_manifest_rules(tmp_path) -> None:
+def test_loaded_extensions_follow_pi_manifest_rules(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     (package / "extensions" / "my-guard.ts").write_text("export default function g(pi) {}\n")
     (package / "extensions" / "lib").mkdir()
@@ -117,7 +117,7 @@ def test_loaded_extensions_follow_pi_manifest_rules(tmp_path) -> None:
     assert pi.check.loaded_extensions(package=package) == both
 
 
-def test_check_survives_odd_manifests_and_rejects_symlinks(tmp_path) -> None:
+def test_check_survives_odd_manifests_and_rejects_symlinks(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     (package / "extensions" / "cap.ts").write_text("export default (pi) => pi.setModel(null);\n")
     (package / "package.json").write_text(json.dumps({"pi": None}))
@@ -130,7 +130,7 @@ def test_check_survives_odd_manifests_and_rejects_symlinks(tmp_path) -> None:
     assert pi.check.check(package=package) == pi.check.static_problems(package=package)
 
 
-def test_check_rejects_changes_to_the_model_contract(tmp_path) -> None:
+def test_check_rejects_changes_to_the_model_contract(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     (package / "extensions" / "cap.ts").write_text(
         "export default function cap(pi) {\n"
@@ -155,7 +155,7 @@ def test_check_rejects_changes_to_the_model_contract(tmp_path) -> None:
     assert not any("compaction" in p for p in problems)
 
 
-def test_check_takes_only_settings_about_how_the_agent_works(tmp_path) -> None:
+def test_check_takes_only_settings_about_how_the_agent_works(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     settings = {
         "defaultModel": "local/other",
@@ -194,7 +194,7 @@ def _write_events(path: Path, records: list[dict]) -> None:
     path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records))
 
 
-def test_transcript_renders_the_task_then_each_turn(tmp_path) -> None:
+def test_transcript_renders_the_task_then_each_turn(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     task = "The parser drops trailing commas. " * 40
     _write_events(
@@ -271,7 +271,7 @@ def test_transcript_renders_the_task_then_each_turn(tmp_path) -> None:
     assert pi.events.transcript(events=tmp_path / "missing.jsonl") == "(no model output)\n"
 
 
-def test_transcript_elides_the_middle_of_long_runs(tmp_path) -> None:
+def test_transcript_elides_the_middle_of_long_runs(tmp_path: Path) -> None:
     records = []
     for i in range(60):
         records.append(
@@ -296,7 +296,7 @@ def test_transcript_elides_the_middle_of_long_runs(tmp_path) -> None:
     assert "entries omitted (tool calls: bash" in text and "[10] 10 tok out" not in text
 
 
-def test_contract_violations(tmp_path) -> None:
+def test_contract_violations(tmp_path: Path) -> None:
     model = core.ModelSpec(
         name="q",
         source="s",
@@ -343,7 +343,7 @@ def test_contract_violations(tmp_path) -> None:
     assert pi.events.contract_violations(requests=tmp_path / "missing.jsonl", model=model) == []
 
 
-def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path) -> None:
+def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path: Path) -> None:
     kwargs = {"enable_thinking": True, "reasoning_effort": "medium"}
     model = core.ModelSpec(
         name="q",
@@ -397,7 +397,7 @@ def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path) 
     ]
 
 
-def test_task_metrics_count_every_call_the_forwarder_saw(tmp_path) -> None:
+def test_task_metrics_count_every_call_the_forwarder_saw(tmp_path: Path) -> None:
     usage = {"input": 500, "output": 40, "cacheRead": 1000}
     _write_events(
         path=tmp_path / "events.jsonl",
@@ -424,7 +424,7 @@ def test_task_metrics_count_every_call_the_forwarder_saw(tmp_path) -> None:
     assert (m.cache_read_tokens, m.context_pct, m.tok_s) == (1000, 1.1, 4.0)
 
 
-def test_task_metrics_measure_the_whole_prompt(tmp_path) -> None:
+def test_task_metrics_measure_the_whole_prompt(tmp_path: Path) -> None:
     _write_events(
         path=tmp_path / "events.jsonl",
         records=[
@@ -439,7 +439,7 @@ def test_task_metrics_measure_the_whole_prompt(tmp_path) -> None:
     assert pi.HARNESS.transcript(instance_dir=tmp_path, full=True).startswith("\n## turn 1 · 0 tok out")
 
 
-def test_task_metrics_count_the_largest_and_capped_responses(tmp_path) -> None:
+def test_task_metrics_count_the_largest_and_capped_responses(tmp_path: Path) -> None:
     _write_events(
         path=tmp_path / "events.jsonl",
         records=[
@@ -463,7 +463,7 @@ def test_task_metrics_count_the_largest_and_capped_responses(tmp_path) -> None:
     assert (m.peak_output_tokens, m.capped_requests) == (16384, 2)
 
 
-def test_a_call_still_running_when_the_run_ended_shows_as_such(tmp_path) -> None:
+def test_a_call_still_running_when_the_run_ended_shows_as_such(tmp_path: Path) -> None:
     call = {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "grep -r x /"}}
     _write_events(
         path=tmp_path / "events.jsonl",
@@ -488,7 +488,7 @@ def test_a_call_still_running_when_the_run_ended_shows_as_such(tmp_path) -> None
     assert (m.tool_ms, m.tool_stats["bash"].count) == (596_000, 1)
 
 
-def test_full_transcript_keeps_every_turn_in_full(tmp_path) -> None:
+def test_full_transcript_keeps_every_turn_in_full(tmp_path: Path) -> None:
     thinking = "Line one of a long plan.\n" * 400
     records = [
         {"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "Fix the parser."}]}},
@@ -543,7 +543,7 @@ def test_model_address() -> None:
     assert pi.model_address(endpoint=remote) == ("api.example.com", 443)
 
 
-def test_check_rejects_workload_terms_in_agent_visible_files(tmp_path) -> None:
+def test_check_rejects_workload_terms_in_agent_visible_files(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     terms = ("swebench", "benchmark", "hidden tests")
     assert pi.check.static_problems(package=package, terms=terms) == []
@@ -560,7 +560,7 @@ def test_check_rejects_workload_terms_in_agent_visible_files(tmp_path) -> None:
     assert pi.check.term_problems(package=package, terms=terms) == problems
 
 
-def test_check_leaves_the_card_to_the_loop(tmp_path) -> None:
+def test_check_leaves_the_card_to_the_loop(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     assert pi.check.static_problems(package=package) == []
     (package / "VARIANT.md").unlink()

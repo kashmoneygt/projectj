@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -41,7 +42,7 @@ def test_make_backend() -> None:
         models.make_backend(spec=bad)
 
 
-def test_server_urls_endpoint_and_log_parsing(tmp_path, monkeypatch) -> None:
+def test_server_urls_endpoint_and_log_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x", port=1234, ctx=4096)
     server = models.make_backend(spec=spec)
@@ -68,13 +69,13 @@ def test_server_urls_endpoint_and_log_parsing(tmp_path, monkeypatch) -> None:
     assert stats.tok_s == 50.0
 
 
-def test_log_stats_missing_file(tmp_path, monkeypatch) -> None:
+def test_log_stats_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x")
     assert models.make_backend(spec=spec).log_stats() is None
 
 
-def test_stop_kills_via_pid_file(tmp_path, monkeypatch) -> None:
+def test_stop_kills_via_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # stop() works from the pid file, since `models down` runs in another process
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x")
@@ -92,6 +93,24 @@ def test_stop_kills_via_pid_file(tmp_path, monkeypatch) -> None:
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_a_pid_from_before_a_reboot_is_left_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    server = models.make_backend(spec=core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x"))
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        server.pid_path.parent.mkdir(parents=True, exist_ok=True)
+        server.pid_path.write_text(str(other.pid))
+        # saved an hour before this process started
+        before = time.time() - 3600
+        os.utime(server.pid_path, (before, before))
+        assert server._starting() is False
+        server.stop()
+        assert other.poll() is None
+        assert not server.pid_path.exists()
+    finally:
+        other.kill()
 
 
 class _FakeLlama(BaseHTTPRequestHandler):
@@ -134,3 +153,13 @@ def test_llama_identity_and_health(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_llama_refuses_a_memory_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x", port=port, memory_gb=8)
+    with pytest.raises(ValueError, match="memory_gb"):
+        models.make_backend(spec=spec).start()

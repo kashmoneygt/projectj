@@ -65,6 +65,10 @@ class LlamaServer(models.LocalServer):
     def start(self) -> None:
         if self.is_running() or self._starting():
             return
+        if self.spec.memory_gb:
+            raise ValueError(
+                f"llama.cpp sizes its memory from ctx and parallel, so leave {self.spec.name}'s memory_gb at 0"
+            )
         gguf = resolve_gguf(spec=self.spec)
         self._launch(
             args=[
@@ -105,7 +109,7 @@ class LlamaServer(models.LocalServer):
                 self.proc.kill()
         else:
             pid = self._pid()
-            if pid is not None and models.pid_alive(pid=pid):
+            if pid is not None:
                 self._terminate(pid=pid)
         self.pid_path.unlink(missing_ok=True)
 

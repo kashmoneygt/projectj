@@ -37,7 +37,7 @@ def _message(output: int, reasoning: int, stop: str, thinking: str) -> str:
     return json.dumps({"type": "message_end", "message": message}) + "\n"
 
 
-def test_stage_holds_the_evidence(tmp_path, monkeypatch) -> None:
+def test_stage_holds_the_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     record = _parent_node()
     record.runs["a__b-1"].metrics = core.TaskMetrics(
@@ -107,7 +107,9 @@ def test_stage_holds_the_evidence(tmp_path, monkeypatch) -> None:
         generation.stage(record=record, h=harness.load(name="pi"), dest=out, nodes=[record])
 
 
-def test_stage_puts_a_passing_and_a_failing_run_of_the_same_task_side_by_side(tmp_path, monkeypatch) -> None:
+def test_stage_puts_a_passing_and_a_failing_run_of_the_same_task_side_by_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     record = _parent_node()
     record.runs["e__f-3"] = core.TaskRun(instance_id="e__f-3", status="ok", resolved=True)
@@ -147,7 +149,7 @@ def test_stage_puts_a_passing_and_a_failing_run_of_the_same_task_side_by_side(tm
     assert "| a__b-1 | 1 of 3 |\n| c__d-2 | 2 of 3 |\n" in overview
 
 
-def test_the_teacher_never_sees_a_task_the_lineage_hides(tmp_path, monkeypatch) -> None:
+def test_the_teacher_never_sees_a_task_the_lineage_hides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     record = _parent_node()
     record.runs["e__f-3"] = core.TaskRun(instance_id="e__f-3", status="ok", resolved=True)
@@ -261,7 +263,16 @@ class _FakeHarness:
         return f"told before {instance_dir.name}\n"
 
     @contextlib.contextmanager
-    def teacher_container(self, *, workspace, out_dir, model, endpoint, name, terms) -> Iterator[str]:
+    def teacher_container(
+        self,
+        *,
+        workspace: Path,
+        out_dir: Path,
+        model: core.ModelSpec,
+        endpoint: core.ModelEndpoint,
+        name: str,
+        terms: tuple[str, ...],
+    ) -> Iterator[str]:
         assert "exactly done" in terms and "swebench" in terms
         self.workspace = workspace
         self.teacher_out = out_dir
@@ -397,7 +408,9 @@ def _candidate(folder: Path, rule: str) -> None:
     (folder / cards.FILE).write_text(f"{folder.name}\nWhat: w\n")
 
 
-def test_collect_takes_no_candidate_from_a_folder_a_symlink_leads_to(tmp_path: Path, monkeypatch) -> None:
+def test_collect_takes_no_candidate_from_a_folder_a_symlink_leads_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     elsewhere = tmp_path / "elsewhere"
     _candidate(folder=elsewhere / "kept", rule="Work in a tight loop.")
@@ -408,7 +421,9 @@ def test_collect_takes_no_candidate_from_a_folder_a_symlink_leads_to(tmp_path: P
     assert (elsewhere / "kept" / cards.FILE).is_file()
 
 
-def test_collect_keeps_none_when_a_session_hands_in_more_than_one(tmp_path: Path, monkeypatch) -> None:
+def test_collect_keeps_none_when_a_session_hands_in_more_than_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     produced = tmp_path / "out" / "variants"
     _candidate(folder=produced / "tight-loop", rule="Work in a tight loop.")
@@ -605,7 +620,7 @@ def _scored_run(name: str, variant: str, outcomes: dict[str, bool], created: flo
     return node
 
 
-def test_tree_stages_the_runs_an_evaluated_variant_flipped(tmp_path, monkeypatch) -> None:
+def test_tree_stages_the_runs_an_evaluated_variant_flipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     parent = _parent_node()
     runs.write_node(node=parent)

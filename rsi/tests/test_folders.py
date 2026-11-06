@@ -1,9 +1,11 @@
+from pathlib import Path
+
 import pytest
 
 from rsi import folders
 
 
-def test_names_and_module(tmp_path) -> None:
+def test_names_and_module(tmp_path: Path) -> None:
     (tmp_path / "alpha").mkdir()
     (tmp_path / "alpha" / "thing.py").write_text("THING = 1\n")
     (tmp_path / "beta").mkdir()
@@ -15,6 +17,6 @@ def test_names_and_module(tmp_path) -> None:
     assert folders.module(root=tmp_path, name="my-thing", file="thing.py").THING == 2
 
 
-def test_module_unknown_lists_known(tmp_path) -> None:
+def test_module_unknown_lists_known(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="known:"):
         folders.module(root=tmp_path, name="nope", file="thing.py", kind="thing")

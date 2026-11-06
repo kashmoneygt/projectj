@@ -67,7 +67,7 @@ def _write_events(path: Path, events: list[dict]) -> None:
     path.write_text("".join(json.dumps(e) + "\n" for e in events))
 
 
-def test_the_teacher_comes_from_models_toml(tmp_path, monkeypatch) -> None:
+def test_the_teacher_comes_from_models_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     (tmp_path / "models.toml").write_text(
         '[teachers.opus]\nagent = "copilot"\nmodel = "claude-opus-5.5"\neffort = "max"\n'
@@ -80,7 +80,9 @@ def test_the_teacher_comes_from_models_toml(tmp_path, monkeypatch) -> None:
     assert teacher.load(name="copilot").name == "copilot"
 
 
-def test_copilot_runs_locked_to_its_container_with_the_users_login(tmp_path, monkeypatch) -> None:
+def test_copilot_runs_locked_to_its_container_with_the_users_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".copilot").mkdir()
     login = {"loggedInUsers": [{"login": "me"}], "lastLoggedInUser": {"login": "me"}, "trustedFolders": ["/"]}
@@ -130,14 +132,14 @@ def test_copilot_runs_locked_to_its_container_with_the_users_login(tmp_path, mon
     assert result.tool_calls == 2
 
 
-def test_copilot_needs_a_login(tmp_path, monkeypatch) -> None:
+def test_copilot_needs_a_login(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(copilot, "HOME", tmp_path / "teacher-home")
     with pytest.raises(RuntimeError, match="/login"):
         copilot._home()
 
 
-def test_a_session_keeps_copilots_own_record_of_it(tmp_path, monkeypatch) -> None:
+def test_a_session_keeps_copilots_own_record_of_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(copilot, "HOME", tmp_path / "teacher-home")
     older = tmp_path / "teacher-home" / "session-state" / "older"
     older.mkdir(parents=True)
@@ -150,7 +152,7 @@ def test_a_session_keeps_copilots_own_record_of_it(tmp_path, monkeypatch) -> Non
     assert older.is_dir()
 
 
-def test_a_stopped_session_still_has_its_transcript_and_cost(tmp_path) -> None:
+def test_a_stopped_session_still_has_its_transcript_and_cost(tmp_path: Path) -> None:
     _write_events(path=tmp_path / "events.jsonl", events=COPILOT_EVENTS)
     with (tmp_path / "events.jsonl").open("a") as fh:
         fh.write('{"type": "assistant.mess')
@@ -162,7 +164,7 @@ def test_a_stopped_session_still_has_its_transcript_and_cost(tmp_path) -> None:
     assert (calls, output, cost) == (2, 0, "2.5 AI credits, 15 premium requests")
 
 
-def test_a_teacher_session_reads_as_steps_for_the_viewer(tmp_path) -> None:
+def test_a_teacher_session_reads_as_steps_for_the_viewer(tmp_path: Path) -> None:
     _write_events(path=tmp_path / "events.jsonl", events=COPILOT_EVENTS)
     view = copilot.TEACHER.trajectory(session_dir=tmp_path)
     assert view.user == "Make one variant."
@@ -174,7 +176,9 @@ def test_a_teacher_session_reads_as_steps_for_the_viewer(tmp_path) -> None:
     assert any(i.kind == "note" for i in view.items) and steps[1].text == "Done."
 
 
-def test_the_mcp_server_speaks_mcp_and_acts_only_in_the_container(monkeypatch, capsys) -> None:
+def test_the_mcp_server_speaks_mcp_and_acts_only_in_the_container(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     server = folders.module(root=paths.teachers_dir(), name="copilot", file="container_mcp.py")
     files = {"/out/a.md": b"one two one"}
     commands: list[list[str]] = []
@@ -226,7 +230,9 @@ def test_the_mcp_server_speaks_mcp_and_acts_only_in_the_container(monkeypatch, c
     )
 
 
-def test_the_mcp_server_answers_every_request(monkeypatch, capsys) -> None:
+def test_the_mcp_server_answers_every_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     server = folders.module(root=paths.teachers_dir(), name="copilot", file="container_mcp.py")
 
     def no_docker(container: str, args: list[str], stdin: bytes | None, timeout_s: int) -> tuple[int, bytes]:
@@ -259,7 +265,7 @@ def _try_variant(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return folders.module(root=paths.harnesses_dir(), name="pi", file="try_variant.py")
 
 
-def test_try_variant_sums_up_a_run(tmp_path, monkeypatch) -> None:
+def test_try_variant_sums_up_a_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     try_variant = _try_variant(monkeypatch=monkeypatch)
     records = [
         {"type": "message_update", "assistantMessageEvent": {}},
@@ -307,7 +313,9 @@ def _events(path: Path, records: list[dict]) -> Path:
     return path
 
 
-def test_the_question_check_says_how_the_package_got_in_the_way(tmp_path, monkeypatch) -> None:
+def test_the_question_check_says_how_the_package_got_in_the_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     try_variant = _try_variant(monkeypatch=monkeypatch)
 
     def problems(records: list[dict], diff: str = "", finished: bool = True, failed: str = "") -> list[str]:
@@ -344,7 +352,9 @@ def test_the_question_check_says_how_the_package_got_in_the_way(tmp_path, monkey
     assert problems(records=[read, quoted]) == []
 
 
-def test_a_run_without_an_answer_from_the_model_says_nothing_about_the_package(tmp_path, monkeypatch) -> None:
+def test_a_run_without_an_answer_from_the_model_says_nothing_about_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     try_variant = _try_variant(monkeypatch=monkeypatch)
     events = tmp_path / "events.jsonl"
     read = _response(stop="toolUse", call="read")
@@ -379,7 +389,12 @@ def test_a_run_without_an_answer_from_the_model_says_nothing_about_the_package(t
     ],
 )
 def test_the_question_is_asked_again_only_while_the_outcome_could_be_chance(
-    tmp_path, monkeypatch, capsys, outcomes: list[str], code: int, asked: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    outcomes: list[str],
+    code: int,
+    asked: int,
 ) -> None:
     try_variant = _try_variant(monkeypatch=monkeypatch)
     pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")

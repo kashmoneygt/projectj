@@ -29,7 +29,7 @@ def test_free_name_makes_any_proposed_name_safe_and_unique() -> None:
         assert variants.safe_variant_name(name=name) == name
 
 
-def test_variant_name_and_resolution(tmp_path, monkeypatch) -> None:
+def test_variant_name_and_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     assert variants.variant_name(reference="") == "baseline"
     assert variants.variant_name(reference="test-before-edit") == "test-before-edit"
@@ -56,7 +56,7 @@ def _card(title: str = "Verify before finishing", reuses: tuple[str, ...] = ()) 
     )
 
 
-def test_package_comparison_ignores_the_card(tmp_path) -> None:
+def test_package_comparison_ignores_the_card(tmp_path: Path) -> None:
     base = tmp_path / "base"
     base.mkdir()
     (base / "a.md").write_text("one\ntwo\n")
@@ -90,7 +90,7 @@ def test_package_comparison_ignores_the_card(tmp_path) -> None:
     assert variants.package_digest(package=copy) != variants.package_digest(package=base)
 
 
-def test_tree_register(tmp_path, monkeypatch) -> None:
+def test_tree_register(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     assert variants.tree_load() == {}
     entry = variants.tree_register(name="verify", parent="baseline", parent_node="n1", card=_card(), diff="+ a.md")
@@ -110,7 +110,9 @@ def test_tree_register(tmp_path, monkeypatch) -> None:
     assert reuser.reuses == ["verify"]
 
 
-def test_the_log_shows_how_the_parent_was_built_one_commit_at_a_time(tmp_path, monkeypatch) -> None:
+def test_the_log_shows_how_the_parent_was_built_one_commit_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     baseline = tmp_path / "baseline"
     baseline.mkdir()
@@ -210,7 +212,9 @@ def test_tree_markdown_compares_with_the_parent_run(tmp_path: Path, monkeypatch:
     assert "None yet, since this is the first round." in empty
 
 
-def test_tree_markdown_shows_this_parents_variants_whole_and_shortens_the_rest(tmp_path, monkeypatch) -> None:
+def test_tree_markdown_shows_this_parents_variants_whole_and_shortens_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     long = cards.VariantCard(title="snapshot the repo", what="word " * 300, why="e", expect="less " * 200)
     variants.tree_register(name="snap", parent="baseline", parent_node="root", card=long, diff="+ a.md")
@@ -264,7 +268,7 @@ def test_tree_markdown_says_why_a_variant_has_no_result_yet(tmp_path: Path, monk
     ) in text
 
 
-def test_records_activations_looks_for_the_acted_entry_in_code(tmp_path) -> None:
+def test_records_activations_looks_for_the_acted_entry_in_code(tmp_path: Path) -> None:
     package = tmp_path / "package"
     (package / "extensions").mkdir(parents=True)
     (package / "APPEND_SYSTEM.md").write_text('Never call pi.appendEntry("acted").\n')
