@@ -140,9 +140,7 @@ def _standing(found: variants.Standing) -> dict:
     hidden = found.hidden
     return {
         "runs": found.runs,
-        "reference_runs": found.reference_runs,
         "solved": found.solved,
-        "reference_solved": found.reference_solved,
         "tasks": found.tasks,
         "solves": _evidence(found=found.solves),
         "hidden": {**_evidence(found=hidden), "tasks": hidden.tasks} if hidden is not None else None,
@@ -231,7 +229,7 @@ def node_data(name: str) -> dict:
     if parent is not None:
         found = tree.reference_runs(parent=parent, tasks=tree.task_set(node=node), nodes=nodes)
         reference = [n for n in found if n.name != node.name]
-    lineage = {n.name for n in nodes if tree.lineage(name=n.name, nodes=nodes)[0].name == root.name}
+    lineage = {n.name for n in tree.members(root=root.name, nodes=nodes)}
     card = _card(entry=entry) if entry is not None else None
     if entry is not None and card is not None:
         card["result"] = variants.scoreboard(entry=entry, nodes=nodes)
@@ -245,7 +243,6 @@ def node_data(name: str) -> dict:
         "parent": node.parent,
         "parent_label": variants.run_label(node=parent) if parent is not None else "",
         "model": node.model.name,
-        "backend": node.model.backend,
         "harness": f"{node.harness} {node.harness_version}",
         "benchmark": node.dataset.name,
         "seed": node.seed,
@@ -299,7 +296,7 @@ def variant_data(name: str) -> dict:
         "name": name,
         "card": _card(entry=entry),
         "parent_label": variants.run_label(node=parent) if parent is not None else entry.parent_node,
-        "diff": _diff(variant=name, parent=parent, harness_name=parent.harness if parent else "pi"),
+        "diff": _diff(variant=name, parent=parent, harness_name=parent.harness) if parent is not None else "",
         "nodes": [n.name for n in variants.variant_nodes(entry=entry, nodes=nodes)],
     }
 
@@ -432,10 +429,9 @@ def _task_row(
         seconds = now - started if started is not None else 0.0
     else:
         seconds = run.seconds if run is not None else 0.0
-    lead = node.dataset.request.partition("{task}")[0]
     return {
         "iid": iid,
-        "brief": _brief(path=str(problem), stamp=started, lead=lead) if started is not None else "",
+        "brief": _brief(path=str(problem), stamp=started, lead=node.dataset.lead) if started is not None else "",
         "state": state,
         "timeout": bool(run is not None and run.status == "timeout"),
         "flip": flip,
@@ -571,11 +567,11 @@ def _rounds(node: core.Node, entries: dict[str, variants.VariantEntry], now: flo
 
 
 def _session_summary(round_dir: Path, session_dir: Path, entries: dict[str, variants.VariantEntry], now: float) -> dict:
-    checks = round_dir / "checks" / session_dir.name
-    checked = sorted(p.name for p in checks.iterdir() if p.is_dir()) if checks.is_dir() else []
-    names = {c: variants.free_name(proposed=c, taken=set()) for c in checked}  # the names they got registered under
-    registered = [c for c in checked if names[c] in entries]
-    rejected = [c for c in checked if c not in registered]
+    _, n, area = session_dir.name.split("-", 2)
+    rejected = sorted(p.parent.name for p in (round_dir / "checks" / session_dir.name).glob("*/PROBLEMS.md"))
+    # a round has one session per area, so round + area tells us which session made a variant
+    node = round_dir.parent.parent.name
+    registered = [e.name for e in entries.values() if (e.parent_node, e.round, e.area) == (node, round_dir.name, area)]
     if registered:
         status = "registered"
     elif rejected:
@@ -586,23 +582,15 @@ def _session_summary(round_dir: Path, session_dir: Path, entries: dict[str, vari
         status = "running"
     else:
         status = "no variant"
-    _, n, area = session_dir.name.split("-", 2)
-    return {
-        "n": int(n),
-        "area": area,
-        "status": status,
-        "registered": [names[c] for c in registered],
-        "rejected": rejected,
-    }
+    return {"n": int(n), "area": area, "status": status, "registered": registered, "rejected": rejected}
 
 
 def _rejection(folder: Path) -> str:
     """Why a candidate was turned down, then the end of each check's log"""
     problems = folder / "PROBLEMS.md"
     parts = [problems.read_text(errors="replace")] if problems.is_file() else []
-    for log_file in [folder / "check.log", *sorted((folder / "question").glob("*.log"))]:
-        if log_file.is_file():
-            parts.append(f"{log_file.relative_to(folder)}:\n{log_file.read_text(errors='replace')[-3_000:]}")
+    for log_file in sorted(folder.rglob("*.log")):
+        parts.append(f"{log_file.relative_to(folder)}:\n{log_file.read_text(errors='replace')[-3_000:]}")
     return "\n\n".join(parts)
 
 

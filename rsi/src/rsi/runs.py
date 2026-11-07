@@ -8,7 +8,7 @@ import pydantic
 from rsi import benchmarks, core, paths
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
@@ -16,7 +16,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def write_node(node: core.Node) -> None:
-    _atomic_write(path=paths.node_dir(name=node.name) / "node.json", text=node.model_dump_json(indent=2) + "\n")
+    atomic_write(path=paths.node_dir(name=node.name) / "node.json", text=node.model_dump_json(indent=2) + "\n")
 
 
 def read_node(name: str) -> core.Node:
@@ -45,7 +45,7 @@ def _records(folder: Path) -> list[Path]:
 
 def record_task_run(node_name: str, run: core.TaskRun) -> None:
     path = paths.instances_dir(node_name=node_name) / run.instance_id / "result.json"
-    _atomic_write(path=path, text=run.model_dump_json(indent=2) + "\n")
+    atomic_write(path=path, text=run.model_dump_json(indent=2) + "\n")
 
 
 def apply_score(node: core.Node, per_instance: dict[str, bool]) -> None:
@@ -130,8 +130,8 @@ def _write_probe_lists(root: core.Node, probe: list[str], hidden: list[str], not
     header = f"# probe set of the lineage rooted at {root.name}: {len(probe)} tasks (seed {root.seed})\n{note}"
     # hidden half first, so a crash can't leave a probe set without one
     hidden_header = f"# hidden from the teacher: {len(hidden)} tasks of {root.name}'s probe set (seed {root.seed})\n"
-    _atomic_write(path=hidden_path(root=root), text=hidden_header + "\n".join(hidden) + "\n")
-    _atomic_write(path=probe_path(root=root), text=header + "\n".join(probe) + "\n")
+    atomic_write(path=hidden_path(root=root), text=hidden_header + "\n".join(hidden) + "\n")
+    atomic_write(path=probe_path(root=root), text=header + "\n".join(probe) + "\n")
 
 
 def never_solved(model: str, dataset: str, nodes: list[core.Node]) -> set[str]:
@@ -159,4 +159,4 @@ def write_preds(path: Path, runs: dict[str, core.TaskRun], model_name: str) -> N
         }
         for instance_id, run in runs.items()
     }
-    _atomic_write(path=path, text=json.dumps(preds, indent=2) + "\n")
+    atomic_write(path=path, text=json.dumps(preds, indent=2) + "\n")

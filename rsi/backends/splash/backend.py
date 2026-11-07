@@ -127,10 +127,6 @@ class SplashServer(models.LocalServer):
             lines.append("  status: not running")
         return lines
 
-    def log_stats(self) -> core.ServerStats | None:
-        # splash doesn't log stats; the harness measures them
-        return None
-
     def identity(self) -> dict[str, str]:
         """Version, weights hash and engine build of the running server"""
         found = self._status(timeout=5)["identity"]

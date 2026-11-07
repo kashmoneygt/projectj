@@ -10,7 +10,6 @@ TASK_FILE = "task.md"  # where every run's folder keeps the task message the age
 
 @dataclasses.dataclass(frozen=True)
 class RunContext:
-    node: core.Node
     instance: core.Instance
     out_dir: Path
     model: core.ModelSpec
@@ -36,6 +35,9 @@ class Harness(Protocol):
 
     def contract(self) -> str:
         """Hash of what every run gets besides the variant"""
+
+    def records_activations(self, *, package: Path) -> bool:
+        """Check if a variant logs when it kicks in, so we can count how often it did"""
 
     def transcript(self, *, instance_dir: Path, full: bool) -> str:
         """The run turn by turn, compact (to read many) or full (to search)"""

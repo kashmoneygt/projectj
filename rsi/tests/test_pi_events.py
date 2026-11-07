@@ -31,8 +31,6 @@ def test_parse_events(tmp_path: Path) -> None:
     with events.open("a") as fh:
         fh.write("not-json\n")
     ev = pi_events.parse_events(events=events)
-    assert ev.requests == 2
-    assert ev.input_tokens == 320
     assert ev.output_tokens == 100
     assert ev.cache_read_tokens == 110
     assert ev.reasoning_tokens == 5
@@ -44,7 +42,7 @@ def test_parse_events(tmp_path: Path) -> None:
 
 def test_parse_events_missing(tmp_path: Path) -> None:
     ev = pi_events.parse_events(events=tmp_path / "nope.jsonl")
-    assert ev.requests == 0
+    assert ev.output_tokens == 0
     assert ev.tool_ms == 0
 
 

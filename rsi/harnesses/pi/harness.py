@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -17,7 +18,7 @@ from pathlib import Path
 import docker
 import requests
 
-from rsi import cards, core, folders, harness, paths, views
+from rsi import cards, core, folders, harness, paths, variants, views
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ CHECK_COMMAND = (
 )
 TRY_COMMAND = '#!/bin/sh\nexec python3 /opt/rsi/try_variant.py "$@"\n'
 
-PI_VERSION = os.environ.get("RSI_PI_VERSION", "1.4.0")
+PI_VERSION = "1.4.0"
 PI_PKG = "@earendil-works/pi-coding-agent"
 PI_REPO = "https://github.com/earendil-works/pi.git"
 PI_BASE_IMAGE = f"rsi/pi-base:{PI_VERSION}"
@@ -66,11 +67,9 @@ TEACHER_DOCKERFILE = (
 # tagged by its Dockerfile's hash
 TEACHER_IMAGE = f"rsi/pi-teacher:{PI_VERSION}-{hashlib.sha256(TEACHER_DOCKERFILE.encode()).hexdigest()[:10]}"
 _live: list[docker.models.containers.Container] = []  # containers cleanup() kills on an interrupt
-
-
-def instance_image(instance_id: str) -> str:
-    # swebench names its amd64 images x86_64, even on arm64 hosts
-    return f"sweb.eval.x86_64.{instance_id}:latest".lower()
+# HARNESS.md asks a variant to call pi.appendEntry("acted", ...) when it kicks in
+ACTED_CALL = re.compile(r"""appendEntry\(\s*["']acted["']""")
+CODE_SUFFIXES = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs")
 
 
 def overlay_image(instance_id: str) -> str:
@@ -238,22 +237,25 @@ def _install_extensions(source_dir: Path, agent_dir: Path) -> None:
 # the run's starting commit, so a timed-out run still gets the right diff
 ORIG_HEAD_FILE = "/out/orig-head"
 STAGING_FAILED = "staging-failed.txt"  # git's error when staging failed (a partial patch)
+
+
 # every change since that commit, new and binary files included. Hooks, fsmonitor, external diff and textconv are off,
 # since the agent could set them. Falls back to the tracked files' diff if git can't stage
-CAPTURE_PATCH = (
-    f'cd /testbed && start="$(cat {ORIG_HEAD_FILE})"\n'
-    'g() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }\n'
-    'if staged="$(g add -A 2>&1)"; then g diff --cached --binary --no-ext-diff --no-textconv "$start"\n'
-    f'else echo "$staged" > /out/{STAGING_FAILED}; g diff --binary --no-ext-diff --no-textconv "$start"\n'
-    "fi > /out/patch.diff\n"
-    "g status --porcelain > /out/status.txt || true\n"
-)
+def capture_patch(workdir: str) -> str:
+    return (
+        f'cd {workdir} && start="$(cat {ORIG_HEAD_FILE})"\n'
+        'g() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }\n'
+        'if staged="$(g add -A 2>&1)"; then g diff --cached --binary --no-ext-diff --no-textconv "$start"\n'
+        f'else echo "$staged" > /out/{STAGING_FAILED}; g diff --binary --no-ext-diff --no-textconv "$start"\n'
+        "fi > /out/patch.diff\n"
+        "g status --porcelain > /out/status.txt || true\n"
+    )
 
 
-def _flush_partial_patch(container: docker.models.containers.Container) -> None:
+def _flush_partial_patch(container: docker.models.containers.Container, workdir: str) -> None:
     # exec_run takes no timeout, but git diff is quick
     try:
-        container.exec_run(["bash", "-lc", CAPTURE_PATCH])
+        container.exec_run(["bash", "-lc", capture_patch(workdir=workdir)])
     except Exception as exc:  # noqa: BLE001
         log.warning(f"partial patch capture failed: {exc}")
 
@@ -370,18 +372,19 @@ def _task_script(ctx: harness.RunContext) -> str:
         pi_model_ref(model=ctx.model),
         "--session-dir",
         "/out/session",
+        # same for every task, so the shell env and session file name don't give away the task
         "--session-id",
-        ctx.instance.instance_id.replace("__", "_1776_"),
+        "task",
         "--mode",
         "json",
     ]
     # diff against the starting HEAD, not the dataset's base commit (the image re-records every file mode)
     return (
         "set -u\n"
-        "cd /testbed\n"
+        f"cd {ctx.instance.workdir}\n"
         f"git rev-parse HEAD > {ORIG_HEAD_FILE}\n"
         f"cat /out/{harness.TASK_FILE} | {' '.join(pi_args)} > /out/events.jsonl 2> /out/pi.err\n"
-        f"{CAPTURE_PATCH}"
+        f"{capture_patch(workdir=ctx.instance.workdir)}"
         "exit 0\n"
     )
 
@@ -392,7 +395,7 @@ def _run_container(
     """Run the task's container to the end or the time limit: its status and error"""
     status, error = "error", None
     container = None
-    name = f"rsi-{ctx.instance.instance_id.replace('__', '_1776_')}"
+    name = f"rsi-{ctx.instance.instance_id}"
     requests_log = request_log(port=model_address(endpoint=ctx.endpoint)[1])
     offset = 0
     ip = ""
@@ -419,7 +422,7 @@ def _run_container(
                 str(ctx.out_dir / "piagent" / "models.json"): {"bind": "/out/piagent/models.json", "mode": "ro"},
             },
             network=network,
-            working_dir="/testbed",
+            working_dir=ctx.instance.workdir,
             name=name,
             detach=True,
         )
@@ -431,7 +434,7 @@ def _run_container(
         except Exception as exc:  # noqa: BLE001
             if _timed_out(exc=exc):
                 # out of time: score the diff so far
-                _flush_partial_patch(container=container)
+                _flush_partial_patch(container=container, workdir=ctx.instance.workdir)
                 status, error = "timeout", f"timed out after {ctx.budget.timeout_s}s"
             else:
                 error = f"wait failed: {type(exc).__name__}: {exc}"
@@ -450,7 +453,10 @@ def _ended(out_dir: Path) -> tuple[str, str | None]:
     events_file = out_dir / "events.jsonl"
     if not events.has_model_output(events=events_file):
         # an error, so finishing the run tries the task again
-        return "error", "no model output in events (pi died before the first assistant message)"
+        why = "no model output in events (pi died before the first assistant message)"
+        err = out_dir / "pi.err"
+        died = err.read_text(errors="replace").strip()[-1500:] if err.exists() else ""
+        return "error", f"{why}: {died}" if died else why
     failed = events.model_error(events=events_file)
     return ("error", f"model request failed: {failed}") if failed else ("ok", None)
 
@@ -474,10 +480,9 @@ class PiHarness:
             tag = overlay_image(instance_id=instance.instance_id)
             if _image_exists(client=client, image=tag):
                 continue
-            base = instance_image(instance_id=instance.instance_id)
-            if not _image_exists(client=client, image=base):
-                raise RuntimeError(f"instance image {base} not present; run `rsi images build` first")
-            missing.append((base, tag))
+            if not _image_exists(client=client, image=instance.image):
+                raise RuntimeError(f"task image {instance.image} not present; run `rsi images build` first")
+            missing.append((instance.image, tag))
         if not missing:
             return
         # overlay builds are mostly I/O, so run several at once
@@ -529,8 +534,6 @@ class PiHarness:
         runtime_pkg = self._stage(ctx=ctx, package=package)
         client = docker.from_env()
         tag = overlay_image(instance_id=ctx.instance.instance_id)
-        if not _image_exists(client=client, image=tag):
-            self.prepare(instances=[ctx.instance])
         start = time.time()
         status, error = _run_container(ctx=ctx, client=client, tag=tag, runtime_pkg=runtime_pkg)
         seconds = round(time.time() - start, 1)
@@ -541,17 +544,16 @@ class PiHarness:
                 f"{ctx.instance.instance_id}: git couldn't stage the changes, so the patch only has the tracked "
                 f"files' diff: {why}"
             )
-        if status == "error" and error is None and (ctx.out_dir / "pi.err").exists():
-            error = (ctx.out_dir / "pi.err").read_text()[-2000:]
-        base_img = instance_image(instance_id=ctx.instance.instance_id)
         return core.TaskRun(
             instance_id=ctx.instance.instance_id,
             status=status,
             patch=patch,
-            trajectory=str(ctx.out_dir / "events.jsonl"),
             seconds=seconds,
-            metrics=self.task_metrics(instance_dir=ctx.out_dir, model=ctx.model, seconds=seconds, patch=patch),
-            images={tag: _digest(client=client, image=tag), base_img: _digest(client=client, image=base_img)},
+            metrics=events.task_metrics(instance_dir=ctx.out_dir, model=ctx.model, seconds=seconds, patch=patch),
+            images={
+                tag: _digest(client=client, image=tag),
+                ctx.instance.image: _digest(client=client, image=ctx.instance.image),
+            },
             error=error,
         )
 
@@ -565,7 +567,7 @@ class PiHarness:
         (agent / "models.json").write_text(json.dumps(models, indent=2))
         check.copy_agent_resources(package=package, agent_dir=agent)
         _install_extensions(source_dir=self.eval_dir, agent_dir=agent)
-        (ctx.out_dir / harness.TASK_FILE).write_text(self.task_prompt(instance=ctx.instance))
+        (ctx.out_dir / harness.TASK_FILE).write_text(ctx.instance.task)
         return check.stage_runtime_package(package=package, dest=ctx.out_dir / "harness-pkg")
 
     @contextlib.contextmanager
@@ -723,10 +725,11 @@ class PiHarness:
             digest.update(f"\0{rel}\0{len(data)}\0".encode() + data)
         return digest.hexdigest()[:12]
 
-    def task_metrics(
-        self, *, instance_dir: Path, model: core.ModelSpec, seconds: float, patch: str
-    ) -> core.TaskMetrics:
-        return events.task_metrics(instance_dir=instance_dir, model=model, seconds=seconds, patch=patch)
+    def records_activations(self, *, package: Path) -> bool:
+        return any(
+            path.suffix in CODE_SUFFIXES and ACTED_CALL.search(path.read_text(errors="replace"))
+            for path in variants.package_files(root=package).values()
+        )
 
     def transcript(self, *, instance_dir: Path, full: bool) -> str:
         return events.transcript(events=instance_dir / "events.jsonl", full=full)
@@ -736,10 +739,6 @@ class PiHarness:
 
     def trajectory(self, *, instance_dir: Path) -> views.Trajectory:
         return events.trajectory(events=instance_dir / "events.jsonl", metrics=instance_dir / "metrics.jsonl")
-
-    def task_prompt(self, instance: core.Instance) -> str:
-        """The task as the benchmark puts it, since pi adds nothing to what a user writes"""
-        return instance.task
 
 
 HARNESS = PiHarness()

@@ -188,11 +188,8 @@ def test_tree_markdown_compares_with_the_parent_run(tmp_path: Path, monkeypatch:
         created=3.0,
     )
     assert [n.name for n in variants.variant_nodes(entry=entry, nodes=[*nodes, other])] == ["child"]
-    line = variants.result_line(node=child, nodes=nodes)
-    assert line.startswith("3/4 vs parent 2/4 on the same tasks (+2 fixed, -1 broken; a split this lopsided")
     # nothing moved, so there's no behavior to report
-    assert line.endswith("happens by chance with p=1.00)")
-    assert variants.result_line(node=child, nodes=nodes, detail=False) == "3/4 vs parent 2/4"
+    assert variants.result_line(node=child, nodes=nodes) == "3/4 vs parent 2/4"
     text = variants.tree_markdown(
         entries=variants.tree_load(), nodes=nodes, lineage=["baseline"], results={}, parent_node="root", turned_down=[]
     )
@@ -257,7 +254,7 @@ def test_tree_markdown_says_why_a_variant_has_no_result_yet(tmp_path: Path, monk
     started.runs["t__t-0"] = core.TaskRun(instance_id="t__t-0", status="ok")
     assert variants.pooled_result(entry=entry, nodes=[started]) == ("not scored yet", "")
     started.runs["t__t-1"] = core.TaskRun(
-        instance_id="t__t-1", status="error", error="pi died:\n  bad | extension in rsi-t_1776_t-1 (T__t-1)"
+        instance_id="t__t-1", status="error", error="pi died:\n  bad | extension in rsi-t__t-1 (T__t-1)"
     )
     text = variants.tree_markdown(
         entries=variants.tree_load(), nodes=[started], lineage=[], results={}, parent_node="root", turned_down=[]
@@ -266,17 +263,6 @@ def test_tree_markdown_says_why_a_variant_has_no_result_yet(tmp_path: Path, monk
         "| verify | baseline |  | Verify before finishing | not scored yet; first error: pi died: bad / extension in "
         "rsi-<task> (<task>) |"
     ) in text
-
-
-def test_records_activations_looks_for_the_acted_entry_in_code(tmp_path: Path) -> None:
-    package = tmp_path / "package"
-    (package / "extensions").mkdir(parents=True)
-    (package / "APPEND_SYSTEM.md").write_text('Never call pi.appendEntry("acted").\n')
-    (package / cards.FILE).write_text('gate\nWhat: it calls pi.appendEntry("acted", ...)\n')
-    (package / "extensions" / "gate.ts").write_text('pi.appendEntry("noted", { what: "x" });\n')
-    assert not variants.records_activations(package=package)
-    (package / "extensions" / "gate.ts").write_text("pi.appendEntry(\n  'acted', { what: 'blocked a call' });\n")
-    assert variants.records_activations(package=package)
 
 
 def test_tree_markdown_says_how_often_a_variant_that_records_it_kicked_in(

@@ -63,13 +63,8 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def test_registry_qwen_uses_splash() -> None:
-    spec = models.get(name="qwen-3.8-27b")
-    assert spec.backend == "splash"
-    assert spec.source == "splash:unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M"
-    backend = models.make_backend(spec=spec)
-    assert type(backend).__name__ == "SplashServer"
-    assert models.get(name="gemma-4-12b").backend == "llama.cpp"
+def test_qwen_is_served_by_splash() -> None:
+    assert type(models.make_backend(spec=models.get(name="qwen-3.8-27b"))).__name__ == "SplashServer"
 
 
 def test_splash_requires_splash_source() -> None:
@@ -108,7 +103,6 @@ def test_splash_command_and_urls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         base_url="http://host.docker.internal:1234/v1",
         root_url="http://host.docker.internal:1234",
     )
-    assert server.log_stats() is None
 
 
 def test_splash_caps_its_memory_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

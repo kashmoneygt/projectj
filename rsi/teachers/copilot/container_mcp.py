@@ -13,9 +13,9 @@ TOOLS = [
         "name": "bash",
         "description": (
             "Run a bash command in the Linux container you work in. Each call starts a fresh shell in /work, which "
-            "is read-only (write under /out or /tmp), so cd and variables don't carry over between calls. It has "
-            "git, python3, pytest, node, pi, check-variant and try-variant, and no internet. Returns the exit code "
-            "and the output (stdout and stderr together; long output keeps its start and end)."
+            "is read-only (write under /out or /tmp), so cd and variables don't carry over between calls. It has no "
+            "internet. Returns the exit code and the output (stdout and stderr together; long output keeps its start "
+            "and end)."
         ),
         "inputSchema": {
             "type": "object",

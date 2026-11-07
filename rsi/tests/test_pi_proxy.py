@@ -16,7 +16,11 @@ forwarder = folders.module(root=paths.harnesses_dir(), name="pi", file="forwarde
 def _read(direction: str, data: bytes, methods: tuple[str, ...] = (), piece: int = 5) -> list[dict]:
     async def go() -> list[dict]:
         entries: list[dict] = []
-        tap = forwarder.Tap(read=getattr(forwarder, direction), methods=collections.deque(methods), log=entries.append)
+        tap = forwarder.Tap(
+            read=getattr(forwarder, direction),
+            methods=collections.deque(methods),
+            log=lambda entry: entries.append(entry),
+        )
         for start in range(0, len(data), piece):
             tap.feed(data[start : start + piece])
             await asyncio.sleep(0)
@@ -358,19 +362,8 @@ def test_a_task_run_keeps_its_share_of_the_request_log(
     out = tmp_path / "runs" / "n" / "instances" / "a__b-1"
     client = _Docker(task=_TaskContainer(out=out, log_file=log_file, sent=sent))
     monkeypatch.setattr(pi.docker, "from_env", lambda: client)
-    node = core.Node(
-        name="n",
-        dataset=core.DatasetSpec(name="d", dataset_id="d"),
-        harness="pi",
-        harness_version=pi.PI_VERSION,
-        model=model,
-        budget=core.Budget(),
-        tasks=1,
-        seed=42,
-    )
     ctx = harness.RunContext(
-        node=node,
-        instance=core.Instance(instance_id="a__b-1", repo="a/b", base_commit="c", task="Fix it."),
+        instance=core.Instance(instance_id="a__b-1", repo="a/b", image="img", workdir="/testbed", task="Fix it."),
         out_dir=out,
         model=model,
         endpoint=core.ModelEndpoint(

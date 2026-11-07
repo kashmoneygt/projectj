@@ -120,7 +120,7 @@ def test_images_build_takes_a_task_list(tmp_path: Path, monkeypatch: pytest.Monk
             pass
 
         def by_ids(self, ids: list[str]) -> list[core.Instance]:
-            return [core.Instance(instance_id=i, repo="r", base_commit="c", task="t") for i in ids]
+            return [core.Instance(instance_id=i, repo="r", image="img", workdir="/testbed", task="t") for i in ids]
 
         def build_images(self, instances: list[core.Instance], workers: int, cwd: Path) -> None:
             built.append([i.instance_id for i in instances])
@@ -280,7 +280,6 @@ def test_make_node_records_what_made_its_runs(tmp_path: Path, monkeypatch: pytes
     assert node.variant == "tight-loop"
     assert node.parent == "t-node"
     assert node.title == "End every turn with progress"
-    assert "+ APPEND_SYSTEM.md" in node.diff_summary
     assert (node.server, node.contract) == (SERVER, CONTRACT)
     assert node.variant_digest == variants.package_digest(package=vdir)
     stored = runs.read_node(name=node.name)
@@ -328,7 +327,7 @@ def test_variants_list_shows_how_each_variant_did(
     cli.variants_list(show="tight-loop")
     out = capsys.readouterr().out
     assert "what:       Tight loop: the change" in out
-    assert "\n  run:        1/1 vs parent 0/1 on the same tasks (+1 fixed, -0 broken; " in out
+    assert "\n  run:        1/1 vs parent 0/1" in out
     assert "\n  result:     1 run, 1.0/1 solved per run\n  result:     solved +1.0 ± 1.0 tasks per run" in out
     assert "+Work in a tight loop." in out
 
@@ -363,7 +362,7 @@ def _made_up_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let the benchmark take a test's made-up task ids, all in one repo"""
 
     def by_ids(ids: list[str]) -> list[core.Instance]:
-        return [core.Instance(instance_id=i, repo="r", base_commit="c", task="p") for i in ids]
+        return [core.Instance(instance_id=i, repo="r", image="img", workdir="/testbed", task="p") for i in ids]
 
     monkeypatch.setattr(benchmarks.get(name="swebench-verified"), "by_ids", by_ids)
 
@@ -375,10 +374,10 @@ class _FakeBench:
         self._ids = ids
 
     def select(self, tasks: int, seed: int) -> list[core.Instance]:
-        return [core.Instance(instance_id=i, repo="r", base_commit="c", task="p") for i in self._ids]
+        return [core.Instance(instance_id=i, repo="r", image="img", workdir="/testbed", task="p") for i in self._ids]
 
     def by_ids(self, ids: list[str]) -> list[core.Instance]:
-        return [core.Instance(instance_id=i, repo="r", base_commit="c", task="p") for i in ids]
+        return [core.Instance(instance_id=i, repo="r", image="img", workdir="/testbed", task="p") for i in ids]
 
 
 def _empty_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ids: list[str]) -> core.Node:
@@ -533,7 +532,6 @@ def test_scoring_grades_a_failed_evaluation_once_more(
     runs.write_preds(path=paths.node_dir(name="t-node") / "preds.json", runs=node.runs, model_name="gemma-4-12b")
     grader = _FlakyGrader(fails=fails)
     monkeypatch.setattr(cli.benchmarks, "get", lambda name: grader)
-    monkeypatch.setattr(cli, "_log_server_stats", lambda model: None)
     cli.score_node(name="t-node", workers=2, clone_tasks=False)
     scored = runs.read_node(name="t-node")
     scratch = paths.node_dir(name="t-node") / "scoring"

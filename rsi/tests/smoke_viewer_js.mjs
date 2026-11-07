@@ -74,7 +74,10 @@ const render = (what, data, code, marker) => {
     checked += 1;
 };
 const tree = await get("/api/tree");
-render("the tree as a graph", tree, "HOME = 'graph'; DATA = __data; renderTree()", 'class="sg"');
+// the graph needs probe runs, which a new lineage doesn't have yet
+if (tree.lineages.some((lineage) => lineage.tree.runs.some((run) => run.probe && run.total))) {
+    render("the tree as a graph", tree, "HOME = 'graph'; DATA = __data; renderTree()", 'class="sg"');
+}
 render("the tree as cards", tree, "HOME = 'cards'; DATA = __data; renderTree()", 'class="node');
 render("tasks across runs", await get("/api/flips"), "DATA = __data; renderFlips()", "<");
 const cards = [];

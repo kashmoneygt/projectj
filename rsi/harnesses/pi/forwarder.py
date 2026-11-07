@@ -5,16 +5,20 @@ import json
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Protocol
 
-# Containers can only reach the model: each model port gets an internal network and this forwarder, which answers to
-# the model URL's host name. It passes the stream through unchanged and logs every request and its usage. It runs in a
-# container on the pi image's python3 (3.11), on its own.
+# forwards a task's model requests as is and logs each one, since it's the task's only way out
+# runs on its own in the pi image, so stick to python 3.11
 
 # request lines leave out the conversation, and log longer parameters by their size
 LEFT_OUT = ("messages", "tools", "functions")
 LONGEST = 1000
 
-Log = Callable[[dict], None]
+
+class Log(Protocol):
+    def __call__(self, entry: dict) -> None: ...
+
+
 Read = Callable[..., Awaitable[None]]  # read_requests or read_responses
 
 
@@ -46,7 +50,7 @@ def usage(raw: bytes, log: Log) -> None:
         return
     found = data.get("usage") if isinstance(data, dict) else None
     if isinstance(found, dict):
-        log({"usage": found})
+        log(entry={"usage": found})
 
 
 async def head(stream: asyncio.StreamReader) -> tuple[list[str], dict[str, str]] | None:
@@ -86,10 +90,10 @@ async def read_requests(stream: asyncio.StreamReader, methods: collections.deque
         methods.append(method)
         if "chunked" in headers.get("transfer-encoding", "").lower():
             # the next request starts somewhere in chunks we don't read
-            log({"method": method, "path": path, "unread": "chunked body"})
+            log(entry={"method": method, "path": path, "unread": "chunked body"})
             return
         sent = await stream.readexactly(int(headers.get("content-length", 0)))
-        log(request(method=method, path=path, body=sent))
+        log(entry=request(method=method, path=path, body=sent))
 
 
 async def read_responses(stream: asyncio.StreamReader, methods: collections.deque[str], log: Log) -> None:
@@ -126,7 +130,7 @@ class Tap:
         except asyncio.IncompleteReadError:
             pass  # the connection ended inside a message
         except Exception as exc:  # noqa: BLE001
-            log({"unread": f"{read.__name__}: {type(exc).__name__}: {exc}"})
+            log(entry={"unread": f"{read.__name__}: {type(exc).__name__}: {exc}"})
         finally:
             self.stream = None
 

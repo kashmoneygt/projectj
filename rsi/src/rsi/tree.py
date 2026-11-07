@@ -1,6 +1,5 @@
 import dataclasses
 import json
-import math
 
 from rsi import core
 
@@ -49,6 +48,11 @@ def lineage(name: str, nodes: list[core.Node]) -> list[core.Node]:
         chain.append(current)
         current = by_name.get(current.parent) if current.parent else None
     return chain[::-1]
+
+
+def members(root: str, nodes: list[core.Node]) -> list[core.Node]:
+    """All nodes in root's lineage"""
+    return [n for n in nodes if lineage(name=n.name, nodes=nodes)[0].name == root]
 
 
 def runs_of(variant: str, tasks: tuple[str, ...], like: core.Node, nodes: list[core.Node]) -> list[core.Node]:
@@ -100,49 +104,6 @@ def made_differently(compared: list[core.Node], packages: list[list[core.Node]])
     return [p for p in problems if p]
 
 
-def sign_test(fixed: int, broken: int) -> float:
-    """Two-sided exact sign test p-value for fixed vs broken"""
-    flips = fixed + broken
-    tail = sum(math.comb(flips, k) for k in range(min(fixed, broken) + 1)) / 2**flips
-    return min(1.0, 2 * tail)
-
-
-@dataclasses.dataclass(frozen=True)
-class Comparison:
-    node: str
-    reference: str | None  # the parent's run on the same tasks, if any
-    resolved: int
-    reference_resolved: int
-    fixed: int  # resolved here, not in the reference
-    broken: int  # resolved in the reference, not here
-    p_value: float  # sign test on fixed vs broken
-
-
-def compare(child: core.Node, reference: core.Node | None) -> Comparison:
-    if reference is None:
-        return Comparison(
-            node=child.name,
-            reference=None,
-            resolved=child.resolved,
-            reference_resolved=0,
-            fixed=0,
-            broken=0,
-            p_value=1.0,
-        )
-    shared = set(child.runs) & set(reference.runs)
-    fixed = sum(1 for t in shared if child.runs[t].resolved and not reference.runs[t].resolved)
-    broken = sum(1 for t in shared if reference.runs[t].resolved and not child.runs[t].resolved)
-    return Comparison(
-        node=child.name,
-        reference=reference.name,
-        resolved=child.resolved,
-        reference_resolved=sum(1 for t in shared if reference.runs[t].resolved),
-        fixed=fixed,
-        broken=broken,
-        p_value=sign_test(fixed=fixed, broken=broken),
-    )
-
-
 @dataclasses.dataclass(frozen=True)
 class Profile:
     """How a node's runs behaved, apart from the score"""
@@ -187,22 +148,13 @@ def behavior_change(before: Profile, after: Profile) -> str:
     return ", ".join(f"{label} {old}→{new}" for label, old, new in pairs if old != new)
 
 
-def best_child(children: list[core.Node]) -> core.Node | None:
-    """Highest score, then most resolved, then earliest"""
-    return max((n for n in children if n.total > 0), key=lambda n: (n.score, n.resolved, -n.created), default=None)
-
-
 def render_tree(nodes: list[core.Node], model_filter: str = "") -> str:
-    """One line per node with its score, '*' marking the best of each comparable group"""
+    """One line per node with its score"""
     shown = sorted((n for n in nodes if n.model.name.startswith(model_filter)), key=lambda n: n.created)
     names = {n.name for n in shown}
     children: dict[str | None, list[core.Node]] = {}
-    groups: dict[tuple, list[core.Node]] = {}
     for n in shown:
         children.setdefault(n.parent if n.parent in names else None, []).append(n)
-        if n.total > 0:
-            groups.setdefault((task_set(node=n), _setup(node=n)), []).append(n)
-    best = {b.name for group in groups.values() if (b := best_child(children=group))}
 
     lines: list[str] = []
     width = max((len(n.name) for n in shown), default=0) + 2
@@ -211,9 +163,8 @@ def render_tree(nodes: list[core.Node], model_filter: str = "") -> str:
         group = children.get(parent, [])
         for i, n in enumerate(group):
             last = i == len(group) - 1
-            star = " *" if n.name in best else ""
             score = f"{n.resolved}/{n.total} ({n.score:.0f}%)" if n.total > 0 else "-"
-            lines.append(f"{prefix}{'└─ ' if last else '├─ '}{n.name:<{width}} {score}{star}")
+            lines.append(f"{prefix}{'└─ ' if last else '├─ '}{n.name:<{width}} {score}")
             walk(parent=n.name, prefix=prefix + ("    " if last else "│   "))
 
     walk(parent=None, prefix="")

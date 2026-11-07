@@ -97,11 +97,16 @@ These stay as they are. Every request to the model is audited where it leaves th
 
 ## Checking a package
 
-`check-variant <dir>` makes sure the package has its card, stages it exactly the way a run does, and tells
-you about files that never reach the agent, a changed manifest, extensions the manifest doesn't load, uses of the
-fixed APIs, words in what the agent sees that name the workload or how it's judged, and whether pi starts with the
-package (against a model that never answers). The same checks run when you hand a variant in, and a variant that
-fails them is never run.
+`check-variant <dir>` makes sure the package has its card and stages it exactly the way a run does. Then it
+tells you about:
+
+- files that never reach the agent
+- a changed manifest, or extensions the manifest doesn't load
+- uses of the fixed APIs
+- words in what the agent sees that name the workload or how it's judged
+- whether pi starts with the package (against a model that never answers)
+
+The same checks run when you hand a variant in, and a variant that fails them is never run.
 
 ## Trying a package
 

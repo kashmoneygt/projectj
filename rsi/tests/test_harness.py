@@ -7,7 +7,7 @@ import docker
 import pytest
 import requests
 
-from rsi import core, folders, harness, paths
+from rsi import cards, core, folders, harness, paths
 
 pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
 
@@ -46,8 +46,8 @@ def test_pi_timeout_saves_the_diff_a_finished_run_gets() -> None:
         def exec_run(self, cmd: list[str]) -> None:
             calls.append(cmd)
 
-    pi._flush_partial_patch(container=_Container())
-    assert calls == [["bash", "-lc", pi.CAPTURE_PATCH]]
+    pi._flush_partial_patch(container=_Container(), workdir="/testbed")
+    assert calls == [["bash", "-lc", pi.capture_patch(workdir="/testbed")]]
 
 
 def test_pi_patch_keeps_new_and_binary_files(tmp_path: Path) -> None:
@@ -60,7 +60,7 @@ def test_pi_patch_keeps_new_and_binary_files(tmp_path: Path) -> None:
     subprocess.run([*git, "commit", "-qm", "start"], cwd=repo, check=True)
     fresh = tmp_path / "fresh"
     shutil.copytree(repo, fresh)
-    script = pi.CAPTURE_PATCH.replace("/testbed", str(repo)).replace("/out", str(out))
+    script = pi.capture_patch(workdir=str(repo)).replace("/out", str(out))
     subprocess.run(["bash", "-c", f"git -C {repo} rev-parse HEAD > {out}/orig-head\n{script}"], check=True)
     assert (out / "patch.diff").read_text() == ""
     (repo / "a.py").write_text("x = 2\n")
@@ -105,19 +105,20 @@ def test_pi_patch_ignores_the_git_config_an_agent_sets(tmp_path: Path) -> None:
         subprocess.run(["git", "config", key, value], cwd=repo, check=True)
     (repo / ".gitattributes").write_text("*.py diff=clean\n")
     (repo / "a.py").write_text("x = 2\n")
-    script = pi.CAPTURE_PATCH.replace("/testbed", str(repo)).replace("/out", str(out))
+    script = pi.capture_patch(workdir=str(repo)).replace("/out", str(out))
     subprocess.run(["bash", "-c", f"git -C {repo} rev-parse HEAD > {out}/orig-head\n{script}"], check=True)
     patch = (out / "patch.diff").read_text()
     assert "-x = 1\n+x = 2\n" in patch and "all clean" not in patch
     assert not ran.exists()
+    # change the file again so plain git add has to update the index and run the hook
+    (repo / "a.py").write_text("x = 3\n")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     assert "hook" in ran.read_text()
     plain = subprocess.run(["git", "diff", "--cached"], cwd=repo, capture_output=True, text=True, check=True)
     assert "all clean" in plain.stdout
 
 
-def test_pi_image_names() -> None:
-    assert pi.instance_image(instance_id="Django__django-11001") == "sweb.eval.x86_64.django__django-11001:latest"
+def test_pi_overlay_image_name() -> None:
     assert pi.overlay_image(instance_id="django__django-11001") == f"rsi/pi-swe/django__django-11001:{pi.PI_VERSION}"
 
 
@@ -167,12 +168,18 @@ def test_pi_check_model() -> None:
     assert "thinking off" in pi.HARNESS.check_model(model=off)
 
 
-def test_pi_task_prompt_is_the_task_as_given(tmp_path: Path) -> None:
-    h = harness.load(name="pi")
+def test_pi_task_script_works_in_the_tasks_folder_and_never_names_the_task(tmp_path: Path) -> None:
     instance = core.Instance(
-        instance_id="a__b-1", repo="a/b", base_commit="c", task="Please resolve this issue:\n\nIt breaks"
+        instance_id="django__django-11001", repo="django/django", image="img", workdir="/work/repo", task="Fix it."
     )
-    assert h.task_prompt(instance=instance) == "Please resolve this issue:\n\nIt breaks"
+    model = core.ModelSpec(name="q", source="path:/x", model_id="q")
+    ctx = harness.RunContext(
+        instance=instance, out_dir=tmp_path, model=model, endpoint=_endpoint(), budget=core.Budget(timeout_s=60)
+    )
+    script = pi._task_script(ctx=ctx)
+    assert script.startswith("set -u\ncd /work/repo\n") and "--session-id task " in script
+    assert "cd /work/repo && start=" in script
+    assert "django" not in script
 
 
 def test_pi_copy_variant_resources(tmp_path: Path) -> None:
@@ -404,3 +411,31 @@ def test_pi_contract_digest(tmp_path: Path) -> None:
         seen.add(h.contract())
     assert len(seen) == 4
     assert len(pi.HARNESS.contract()) == 12
+
+
+def test_every_question_is_about_a_small_repo_that_needs_no_change() -> None:
+    questions = sorted(d.name for d in pi.QUESTIONS_DIR.iterdir() if d.is_dir())
+    assert questions == ["javascript", "python"] and pi.PRACTICE_QUESTION.name == "javascript"
+    for name in questions:
+        question = pi.QUESTIONS_DIR / name
+        assert (question / "question.md").read_text().strip().endswith("?")
+        assert (question / "repo" / "README.md").is_file()
+    # npm install leaves a committed lockfile as it is, so a reflexive install changes nothing
+    assert (pi.PRACTICE_QUESTION / "repo" / "package-lock.json").is_file()
+
+
+def test_the_teacher_container_installs_both_helpers() -> None:
+    assert "check_variant.py --terms /opt/rsi/terms.txt --manifest /opt/harness/package.json" in pi.CHECK_COMMAND
+    assert "try_variant.py" in pi.TRY_COMMAND
+    assert subprocess.run(["sh", "-n", "-c", pi.TRY_COMMAND], check=False).returncode == 0
+
+
+def test_records_activations_looks_for_the_acted_entry_in_code(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    (package / "extensions").mkdir(parents=True)
+    (package / "APPEND_SYSTEM.md").write_text('Never call pi.appendEntry("acted").\n')
+    (package / cards.FILE).write_text('gate\nWhat: it calls pi.appendEntry("acted", ...)\n')
+    (package / "extensions" / "gate.ts").write_text('pi.appendEntry("noted", { what: "x" });\n')
+    assert not pi.HARNESS.records_activations(package=package)
+    (package / "extensions" / "gate.ts").write_text("pi.appendEntry(\n  'acted', { what: 'blocked a call' });\n")
+    assert pi.HARNESS.records_activations(package=package)

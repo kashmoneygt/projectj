@@ -106,7 +106,15 @@ def lineage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, core.N
     (package / "package.json").write_text("{}")
     (package / "APPEND_SYSTEM.md").write_text("Keep your thinking short.\n")
     card = cards.VariantCard(title="Cap thinking", what="h", why="e", expect="p")
-    variants.tree_register(name="cap", parent="baseline", parent_node="root", card=card, diff="+ APPEND_SYSTEM.md")
+    variants.tree_register(
+        name="cap",
+        parent="baseline",
+        parent_node="root",
+        card=card,
+        diff="+ APPEND_SYSTEM.md",
+        area="tools",
+        round="20261027-163053",
+    )
     waiting = cards.VariantCard(title="Not run yet", what="h")
     variants.tree_register(name="later", parent="baseline", parent_node="root", card=waiting, diff="+ x")
     repeat = _node(name="repeat", parent="root", resolved={"a__b-1": False, "c__d-2": True})
@@ -126,10 +134,10 @@ def test_the_tree_is_harnesses_with_their_runs_and_how_each_did(lineage: dict[st
     cap, later = base["children"]
     assert (cap["title"], cap["href"]) == ("Cap thinking", "#node/variant")
     assert (base["changed"], cap["changed"]) == ("", "+ APPEND_SYSTEM.md")
-    assert (cap["round"], cap["reuses"]) == ("", [])
+    assert (cap["round"], cap["reuses"]) == ("20261027-163053", [])
     assert [r["name"] for r in cap["runs"]] == ["variant"]
     assert (cap["solved"], cap["of"]) == (2.0, 2)
-    assert cap["standing"]["solves"]["gain"] == 1.0 and cap["standing"]["reference_runs"] == 2
+    assert cap["standing"]["solves"]["gain"] == 1.0 and cap["standing"]["runs"] == 1
     assert cap["standing"]["better_by"] == ""
     assert (later["runs"], later["href"], later["standing"]) == ([], "#variant/later", None)
 
@@ -165,7 +173,7 @@ def test_a_run_shows_its_numbers_next_to_its_parents_runs(lineage: dict[str, cor
     assert viewer._brief(path=str(asked), stamp=1.0, lead=lead) == "float16 gets upgraded"
     assert data["card"]["what"] == "h" and "Keep your thinking short." in data["diff"]
     assert data["card"]["result"][:3] == [
-        "from root",
+        "from root, area tools",
         "1 run, 2.0/2 solved per run",
         "solved +1.0 ± 0.7 tasks per run, within noise (1 run vs 2 of the parent, 2 tasks)",
     ]

@@ -2,9 +2,6 @@ import dataclasses
 import json
 import re
 
-# What the viewer shows of an agent's run and of how a task was judged. Each harness, teacher and benchmark builds
-# these from its own files, so the viewer never reads them itself.
-
 # how much of each part the viewer shows, in characters
 THINK_MAX = 30_000
 TEXT_MAX = 20_000
@@ -23,7 +20,7 @@ class Call:
     id: str
     name: str
     label: str
-    args: dict  # what it sent, trimmed: its command, content, edits (each old and new) or json
+    args: dict  # what it sent, trimmed (a command, content, edits or json)
     out: str | None = None
     ok: bool | None = None
     ms: float | None = None
@@ -72,7 +69,7 @@ class Timing:
 class Trajectory:
     user: str = ""  # the first message
     items: list[Step | Note] = dataclasses.field(default_factory=list)
-    inflight_at: float | None = None  # when a response still being written started, in ms
+    inflight_at: float | None = None  # when the unfinished response started, in ms
     timing: list[Timing] = dataclasses.field(default_factory=list)
 
 

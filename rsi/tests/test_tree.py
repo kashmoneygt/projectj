@@ -65,16 +65,6 @@ def test_derive_node_name() -> None:
     )
 
 
-def test_best_child_policy() -> None:
-    assert tree.best_child(children=[_node(name="a")]) is None
-    a = _node(name="a", resolved=1, total=10, created=100.0)
-    b = _node(name="b", resolved=3, total=10, created=200.0)
-    c = _node(name="c", resolved=3, total=10, created=50.0)
-    assert tree.best_child(children=[a, b, c]).name == "c"
-    d = _node(name="d", resolved=5, total=10, created=300.0)
-    assert tree.best_child(children=[a, b, c, d]).name == "d"
-
-
 def test_render_tree() -> None:
     prefix = "gemma-4-12b--pi--swebench-verified--"
     root = _node(name=prefix + "baseline--10t--s42", created=1.0, resolved=1, total=10)
@@ -84,9 +74,9 @@ def test_render_tree() -> None:
     lines = tree.render_tree(nodes=[c2, root, c1, other]).splitlines()
     assert len(lines) == 4
     assert lines[0].startswith("├─ " + root.name)
-    assert lines[1].startswith("│   ├─ " + c1.name) and lines[1].rstrip().endswith("*")
-    assert lines[2].startswith("│   └─ " + c2.name) and "*" not in lines[2]
-    assert lines[3].startswith("└─ " + other.name) and "*" not in lines[3]
+    assert lines[1].startswith("│   ├─ " + c1.name) and lines[1].rstrip().endswith("3/10 (30%)")
+    assert lines[2].startswith("│   └─ " + c2.name)
+    assert lines[3].startswith("└─ " + other.name) and lines[3].rstrip().endswith("-")
 
 
 def _scored(name: str, parent: str | None, variant: str, outcomes: dict[str, bool], created: float) -> core.Node:
@@ -120,9 +110,6 @@ def test_reference_run_is_the_parent_variant_on_the_same_tasks() -> None:
     other_model = _scored(name="other-model", parent="root", variant="", outcomes=probe, created=4.0)
     other_model.model = core.ModelSpec(name="qwen-3.8-27b", source="hf:x", model_id="q")
     assert tree.reference_run(child=child, nodes=[root, repeat, child, other_model]).name == "repeat"
-    c = tree.compare(child=child, reference=repeat)
-    assert (c.resolved, c.reference_resolved, c.fixed, c.broken) == (2, 1, 1, 0)
-    assert tree.compare(child=child, reference=None).reference is None
 
 
 def test_the_reference_is_every_run_of_the_parents_harness_on_the_same_tasks() -> None:
@@ -187,13 +174,6 @@ def test_a_child_made_differently_from_its_parent_has_no_reference_run() -> None
     assert tree.reference_run(child=child, nodes=[root, repeat, child]) is None
 
 
-def test_sign_test() -> None:
-    assert tree.sign_test(fixed=0, broken=0) == 1.0
-    assert tree.sign_test(fixed=3, broken=3) == 1.0
-    assert abs(tree.sign_test(fixed=10, broken=2) - 0.0386) < 1e-3
-    assert tree.sign_test(fixed=2, broken=10) == tree.sign_test(fixed=10, broken=2)
-
-
 def test_profile_counts_the_observables() -> None:
     node = _scored(name="n", parent=None, variant="", outcomes={"a": True, "b": False}, created=1.0)
     node.runs["a"].patch = "diff"
@@ -214,11 +194,3 @@ def test_profile_counts_the_observables() -> None:
     assert change.startswith("runs ending cut at the output cap 1→0, timeouts/errors 1→0")
     assert "runs that changed no file" not in change
     assert "thinking share 75%→0%" in change and change.endswith("minutes/task 2.0→0.0")
-
-
-def test_render_tree_marks_best_per_task_set() -> None:
-    root = _node(name="root", created=1.0, resolved=1, total=10)
-    a = _scored(name="a", parent="root", variant="/v/a", outcomes={"x": True, "y": True}, created=2.0)
-    b = _scored(name="b", parent="root", variant="/v/b", outcomes={"z": False, "w": True}, created=3.0)
-    lines = tree.render_tree(nodes=[root, a, b]).splitlines()
-    assert all(line.rstrip().endswith("*") for line in lines)

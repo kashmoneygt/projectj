@@ -469,27 +469,7 @@ def test_try_variant_stops_pi_when_it_is_stopped(tmp_path: Path) -> None:
     assert all(gone(pid=pid) for pid in pids)
 
 
-def test_every_question_is_about_a_small_repo_that_needs_no_change() -> None:
-    pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
-    questions = sorted(d.name for d in pi.QUESTIONS_DIR.iterdir() if d.is_dir())
-    assert questions == ["javascript", "python"] and pi.PRACTICE_QUESTION.name == "javascript"
-    for name in questions:
-        question = pi.QUESTIONS_DIR / name
-        assert (question / "question.md").read_text().strip().endswith("?")
-        assert (question / "repo" / "README.md").is_file()
-    # npm install leaves a committed lockfile as it is, so a reflexive install changes nothing
-    assert (pi.PRACTICE_QUESTION / "repo" / "package-lock.json").is_file()
-
-
-def test_the_teacher_container_installs_both_helpers() -> None:
-    pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
-    assert "check_variant.py --terms /opt/rsi/terms.txt --manifest /opt/harness/package.json" in pi.CHECK_COMMAND
-    assert "try_variant.py" in pi.TRY_COMMAND
-    assert subprocess.run(["sh", "-n", "-c", pi.TRY_COMMAND], check=False).returncode == 0
-
-
 def test_mcp_server_runs_with_the_standard_library_alone() -> None:
-    # Copilot runs it with the host's python3, without rsi installed
     command = [sys.executable, "-S", copilot.container_mcp.__file__, "rsi-teacher-x"]
     done = subprocess.run(command, input="", capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr

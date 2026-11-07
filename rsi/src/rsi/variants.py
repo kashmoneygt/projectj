@@ -7,7 +7,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rsi import cards, core, paths, runs, stats, tree
+from rsi import cards, core, harness, paths, runs, stats, tree
 
 
 def safe_variant_name(name: str) -> str:
@@ -103,20 +103,10 @@ def package_digest(package: Path) -> str:
     return digest.hexdigest()
 
 
-# a variant logs that it acted with pi.appendEntry("acted", ...)
-ACTED_CALL = re.compile(r"""appendEntry\(\s*["']acted["']""")
-CODE_SUFFIXES = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs")
+DIFF_ENTRIES = 12  # files listed in a diff summary before "+N more"
 
 
-def records_activations(package: Path) -> bool:
-    """Check if the package logs when it acts"""
-    return any(
-        path.suffix in CODE_SUFFIXES and ACTED_CALL.search(path.read_text(errors="replace"))
-        for path in package_files(root=package).values()
-    )
-
-
-def diff_summary(base: Path, variant: Path, max_entries: int = 12) -> str:
+def diff_summary(base: Path, variant: Path) -> str:
     """One line of the files a variant added (+), removed (-) or changed (~)"""
     base_files, variant_files = package_files(root=base), package_files(root=variant)
     entries: list[str] = []
@@ -131,8 +121,8 @@ def diff_summary(base: Path, variant: Path, max_entries: int = 12) -> str:
                 entries.append(f"~ {name} (+{changed[0]} -{changed[1]})")
     if not entries:
         return "identical"
-    if len(entries) > max_entries:
-        entries = [*entries[:max_entries], f"+{len(entries) - max_entries} more"]
+    if len(entries) > DIFF_ENTRIES:
+        entries = [*entries[:DIFF_ENTRIES], f"+{len(entries) - DIFF_ENTRIES} more"]
     return ", ".join(entries)
 
 
@@ -200,10 +190,8 @@ def tree_load() -> dict[str, VariantEntry]:
 
 
 def tree_save(entries: dict[str, VariantEntry]) -> None:
-    path = paths.tree_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = {name: dataclasses.asdict(entry) for name, entry in sorted(entries.items())}
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    runs.atomic_write(path=paths.tree_path(), text=json.dumps(data, indent=2) + "\n")
 
 
 def tree_register(
@@ -255,23 +243,17 @@ def variant_nodes(entry: VariantEntry, nodes: list[core.Node]) -> list[core.Node
     )
 
 
-def result_line(node: core.Node, nodes: list[core.Node], detail: bool = True) -> str:
-    """A node's result vs its parent's run on the same tasks (and behavior, with detail)"""
+def result_line(node: core.Node, nodes: list[core.Node]) -> str:
+    """A run's score vs its parent's run on the same tasks, plus any change in behavior"""
     if node.total == 0:
         return "not scored yet"
-    reference = tree.reference_run(child=node, nodes=nodes)
     line = f"{node.resolved}/{node.total}"
-    if reference is not None:
-        comparison = tree.compare(child=node, reference=reference)
-        line += f" vs parent {comparison.reference_resolved}/{node.total}"
-        if detail:
-            line += (
-                f" on the same tasks (+{comparison.fixed} fixed, -{comparison.broken} broken; a split this "
-                f"lopsided happens by chance with p={comparison.p_value:.2f})"
-            )
-            change = tree.behavior_change(before=tree.profile(node=reference), after=tree.profile(node=node))
-            line += f"; {change}" if change else ""
-    return line
+    reference = tree.reference_run(child=node, nodes=nodes)
+    if reference is None:
+        return line
+    solved = sum(reference.runs[task].resolved for task in set(node.runs) & set(reference.runs))
+    change = tree.behavior_change(before=tree.profile(node=reference), after=tree.profile(node=node))
+    return f"{line} vs parent {solved}/{node.total}" + (f"; {change}" if change else "")
 
 
 def pooled_runs(entry: VariantEntry, nodes: list[core.Node]) -> tuple[list[core.Node], list[core.Node], list[str]]:
@@ -297,8 +279,7 @@ def pooled_result(entry: VariantEntry, nodes: list[core.Node]) -> tuple[str, str
             return "not scored yet", ""
         task, error = errors[0]
         # drop the task id, which may be a hidden task
-        for name in (task, task.replace("__", "_1776_")):
-            error = re.sub(re.escape(name), "<task>", error, flags=re.IGNORECASE)
+        error = re.sub(re.escape(task), "<task>", error, flags=re.IGNORECASE)
         first = " ".join(error.split())[:200].replace("|", "/")
         return f"not scored yet; first error: {first}", ""
     line = f"{sum(n.resolved for n in same) / len(same):.1f}/{len(tasks)} per run"
@@ -313,7 +294,8 @@ def pooled_result(entry: VariantEntry, nodes: list[core.Node]) -> tuple[str, str
 def activations(entry: VariantEntry, nodes: list[core.Node]) -> str:
     """How many scored task runs a variant acted on, if it logs that"""
     ran = [n for n in variant_nodes(entry=entry, nodes=nodes) if n.total > 0]
-    if not ran or not records_activations(package=resolve_variant(reference=ran[0].variant)):
+    package = resolve_variant(reference=ran[0].variant) if ran else None
+    if package is None or not harness.load(name=ran[0].harness).records_activations(package=package):
         return ""
     task_runs = [run for n in ran for run in n.runs.values()]
     return f"kicked in on {sum(run.metrics.acted > 0 for run in task_runs)} of {len(task_runs)} task runs"
@@ -326,8 +308,6 @@ class Standing:
     runs: int
     tasks: int
     solved: float  # tasks solved per run
-    reference_runs: int
-    reference_solved: float
     solves: stats.Evidence
     hidden: stats.Evidence | None  # on the tasks hidden from the teacher
     tokens: stats.TokenEvidence
@@ -358,8 +338,6 @@ def standing(entry: VariantEntry, nodes: list[core.Node]) -> Standing | None:
         runs=len(same),
         tasks=len(tasks),
         solved=sum(n.resolved for n in same) / len(same),
-        reference_runs=len(reference),
-        reference_solved=sum(n.resolved for n in reference) / len(reference),
         solves=stats.evidence(variant=same, reference=reference, tasks=tasks),
         hidden=stats.evidence(variant=same, reference=reference, tasks=hidden) if hidden else None,
         tokens=stats.token_evidence(variant=same, reference=reference, tasks=tasks),

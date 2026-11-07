@@ -19,7 +19,7 @@ def _build_missing(
     )
 
 
-# swebench rebuilds every image on each eval with --task-repo; ours never changes, so build each once
+# with --task-repo, swebench's eval rebuilds every image, so reuse the ones `rsi images build` made
 docker_build.build_instance_images = _build_missing
 
 if __name__ == "__main__":

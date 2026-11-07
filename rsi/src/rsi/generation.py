@@ -403,7 +403,7 @@ def default_areas(record: core.Node, nodes: list[core.Node]) -> list[str]:
     """Open first, then the least-covered areas, then compose once two variants are worth combining"""
     lineage = tree.lineage(name=record.name, nodes=nodes)
     root = lineage[0].name if lineage else record.name
-    members = [n.name for n in nodes if tree.lineage(name=n.name, nodes=nodes)[0].name == root]
+    members = [n.name for n in tree.members(root=root, nodes=nodes)]
     # a session's folder is session-<n>-<area>
     given = Counter(
         session.name.split("-", 2)[2]

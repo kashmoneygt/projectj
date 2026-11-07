@@ -6,6 +6,7 @@ import sys
 import tokenize
 from pathlib import Path
 
+import pytest
 import requests
 
 from rsi import core, folders, paths
@@ -271,7 +272,7 @@ def test_transcript_renders_the_task_then_each_turn(tmp_path: Path) -> None:
     assert pi.events.transcript(events=tmp_path / "missing.jsonl") == "(no model output)\n"
 
 
-def test_transcript_elides_the_middle_of_long_runs(tmp_path: Path) -> None:
+def test_transcript_elides_the_middle_of_long_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     records = []
     for i in range(60):
         records.append(
@@ -290,7 +291,8 @@ def test_transcript_elides_the_middle_of_long_runs(tmp_path: Path) -> None:
         records.append({"type": "tool_execution_end", "toolCallId": f"c{i}", "isError": i % 2 == 0, "result": {}})
     events = tmp_path / "events.jsonl"
     _write_events(path=events, records=records)
-    text = pi.events.transcript(events=events, max_chars=1500)
+    monkeypatch.setattr(pi.events, "TRANSCRIPT_MAX_CHARS", 1500)
+    text = pi.events.transcript(events=events)
     assert len(text) < 1700
     assert "[1] 10 tok out" in text and "[60] 10 tok out" in text
     assert "entries omitted (tool calls: bash" in text and "[10] 10 tok out" not in text
@@ -405,7 +407,7 @@ def test_task_metrics_count_every_call_the_forwarder_saw(tmp_path: Path) -> None
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
     # the agent's own events don't count, since the forwarder sees every call
-    m = pi.HARNESS.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
     assert (m.requests, m.input_tokens, m.output_tokens) == (0, 0, 0)
     chat = {"method": "POST", "path": "/v1/chat/completions", "params": {}}
     lines = [
@@ -419,7 +421,7 @@ def test_task_metrics_count_every_call_the_forwarder_saw(tmp_path: Path) -> None
         {"ip": "a", "usage": {"prompt_tokens": 300, "completion_tokens": 25}},
     ]
     (tmp_path / "requests.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
-    m = pi.HARNESS.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
     assert (m.requests, m.input_tokens, m.output_tokens) == (2, 800, 65)
     assert (m.cache_read_tokens, m.context_pct, m.tok_s) == (1000, 1.1, 4.0)
 
@@ -432,7 +434,7 @@ def test_task_metrics_measure_the_whole_prompt(tmp_path: Path) -> None:
         ],
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    m = pi.HARNESS.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="+a\n\n")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="+a\n\n")
     assert m.context_pct == 49.6
     assert m.patch_lines == 1
     assert pi.HARNESS.transcript(instance_dir=tmp_path, full=False).startswith("[1] 0 tok out")
@@ -459,7 +461,7 @@ def test_task_metrics_count_the_largest_and_capped_responses(tmp_path: Path) -> 
         ],
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    m = pi.HARNESS.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
     assert (m.peak_output_tokens, m.capped_requests) == (16384, 2)
 
 
@@ -484,7 +486,7 @@ def test_a_call_still_running_when_the_run_ended_shows_as_such(tmp_path: Path) -
     )
     assert "→ still running when the run ended\n" in pi.events.transcript(events=tmp_path / "events.jsonl", full=True)
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    m = pi.HARNESS.task_metrics(instance_dir=tmp_path, model=model, seconds=600.0, patch="")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=600.0, patch="")
     assert (m.tool_ms, m.tool_stats["bash"].count) == (596_000, 1)
 
 

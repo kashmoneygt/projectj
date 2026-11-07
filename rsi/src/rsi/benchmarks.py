@@ -36,7 +36,6 @@ class Benchmark(Protocol):
         """How a task was judged, from what scoring left in its folder (None before scoring)"""
 
     def gold(self, instance_id: str, run_id: str, cwd: Path) -> None: ...
-    def clean_images(self, cwd: Path) -> None: ...
 
 
 def rows(spec: core.DatasetSpec) -> list[dict]:
@@ -65,7 +64,7 @@ def spread(ids: list[str], repos: dict[str, str], count: int, seed: int) -> list
 
 def banned_terms(benchmark: Benchmark) -> tuple[str, ...]:
     """Words a variant can't put in front of the agent, which are the benchmark's own and how its task message starts"""
-    lead = benchmark.dataset.request.partition("{task}")[0].strip()
+    lead = benchmark.dataset.lead.strip()
     return benchmark.protocol_terms + ((lead,) if lead else ())
 
 

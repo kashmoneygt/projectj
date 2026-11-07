@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -12,10 +11,6 @@ import huggingface_hub
 from rsi import core, models, paths
 
 log = logging.getLogger(__name__)
-
-_LOG_CACHE_HIT = re.compile(r"cache hit: ([\d.]+)%")
-_LOG_PROMPT = re.compile(r"prompt eval time = [\d.]+ ms / (\d+) tokens")
-_LOG_EVAL = re.compile(r"eval time = ([\d.]+) ms / (\d+) new tokens")
 
 
 def find_llama_bin() -> str:
@@ -123,35 +118,6 @@ class LlamaServer(models.LocalServer):
 
     def identity(self) -> dict[str, str]:
         return {"version": self._version(), "source": self.spec.source}
-
-    def log_stats(self) -> core.ServerStats | None:
-        # server-wide numbers, since llama-server doesn't log them per request
-        log_file = self.log_path
-        if not log_file.exists():
-            return None
-        cache_hits: list[float] = []
-        prompt_tokens = completion_tokens = 0
-        gen_ms = 0.0
-        for line in log_file.read_text(errors="replace").splitlines():
-            m = _LOG_CACHE_HIT.search(line)
-            if m:
-                cache_hits.append(float(m.group(1)))
-            m = _LOG_PROMPT.search(line)
-            if m:
-                prompt_tokens += int(m.group(1))
-            m = _LOG_EVAL.search(line)
-            if m:
-                gen_ms += float(m.group(1))
-                completion_tokens += int(m.group(2))
-        if completion_tokens == 0:
-            return None
-        return core.ServerStats(
-            requests=len(cache_hits),
-            cache_hits=cache_hits,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            tok_s=completion_tokens / (gen_ms / 1000.0),
-        )
 
 
 BACKEND = LlamaServer

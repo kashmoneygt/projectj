@@ -24,10 +24,7 @@ def test_parse_source_hf_and_path() -> None:
             llama.parse_source(source=bad)
 
 
-def test_registry_lookup() -> None:
-    specs = models.registry()
-    assert "gemma-4-12b" in specs
-    assert models.get(name="gemma-4-12b").port == 11500
+def test_an_unknown_model_name_is_an_error() -> None:
     with pytest.raises(KeyError):
         models.get(name="nope")
 
@@ -42,7 +39,7 @@ def test_make_backend() -> None:
         models.make_backend(spec=bad)
 
 
-def test_server_urls_endpoint_and_log_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_server_urls_and_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x", port=1234, ctx=4096)
     server = models.make_backend(spec=spec)
@@ -51,28 +48,6 @@ def test_server_urls_endpoint_and_log_parsing(tmp_path: Path, monkeypatch: pytes
     assert server.endpoint() == core.ModelEndpoint(
         model_id="x", base_url="http://host.docker.internal:1234/v1", root_url="http://host.docker.internal:1234"
     )
-
-    server.log_path.parent.mkdir(parents=True, exist_ok=True)
-    server.log_path.write_text(
-        "cache hit: 10.0%\nprompt eval time = 100.0 ms / 100 tokens ( 1.00 ms per token, 1000.00 tokens per second)\n"
-        "eval time = 1000.0 ms / 50 new tokens ( 20.00 ms per token, 50.00 tokens per second)\n"
-        "cache hit: 50.0%\nprompt eval time = 100.0 ms / 200 tokens ( 1.00 ms per token, 2000.00 tokens per second)\n"
-        "eval time = 2000.0 ms / 100 new tokens ( 20.00 ms per token, 50.00 tokens per second)\n"
-    )
-    stats = server.log_stats()
-    assert stats is not None
-    assert isinstance(stats, core.ServerStats)
-    assert stats.requests == 2
-    assert stats.avg_cache_hit == 30.0
-    assert stats.prompt_tokens == 300
-    assert stats.completion_tokens == 150
-    assert stats.tok_s == 50.0
-
-
-def test_log_stats_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
-    spec = core.ModelSpec(name="m", source="path:/tmp/x.gguf", model_id="x")
-    assert models.make_backend(spec=spec).log_stats() is None
 
 
 def test_stop_kills_via_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

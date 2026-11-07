@@ -18,6 +18,11 @@ class DatasetSpec(Frozen):
     revision: str = ""  # pinned HF dataset revision
     request: str = "{task}"  # how a task is put to the agent; {task} is the task's own text
 
+    @property
+    def lead(self) -> str:
+        """What every task message starts with"""
+        return self.request.partition("{task}")[0]
+
 
 class ModelSpec(Frozen):
     """Model serving parameters (from models.toml)"""
@@ -49,18 +54,6 @@ class ModelEndpoint:
     root_url: str = ""  # server root, for /tokenize
 
 
-class ServerStats(BaseModel):
-    requests: int = 0
-    cache_hits: list[float] = Field(default_factory=list)
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    tok_s: float = 0.0
-
-    @property
-    def avg_cache_hit(self) -> float | None:
-        return sum(self.cache_hits) / len(self.cache_hits) if self.cache_hits else None
-
-
 class ModelBackend(Protocol):
     """A model server on the host machine"""
 
@@ -73,7 +66,6 @@ class ModelBackend(Protocol):
     def host_url(self) -> str: ...
     def endpoint(self) -> ModelEndpoint: ...
     def status_lines(self) -> list[str]: ...
-    def log_stats(self) -> ServerStats | None: ...
     def identity(self) -> dict[str, str]: ...  # version, weights and build, saved on every node
     def healthy(self, timeout_s: float) -> bool: ...  # answers a one-token request in time
 
@@ -85,7 +77,8 @@ class Budget(Frozen):
 class Instance(Frozen):
     instance_id: str
     repo: str
-    base_commit: str
+    image: str  # docker image the task runs and gets graded in
+    workdir: str  # where the task's repo is in that image
     task: str  # the message the agent gets, as a user would write it
 
 
@@ -121,7 +114,7 @@ class TaskMetrics(BaseModel):
     patch_lines: int = 0  # non-empty lines in the final diff
     peak_output_tokens: int = 0  # largest single response, thinking included
     capped_requests: int = 0  # responses cut at the output cap
-    acted: int = 0  # times the variant called pi.appendEntry("acted", ...)
+    acted: int = 0  # times the variant said it kicked in
     contract_violations: list[str] = Field(default_factory=list)  # requests off the pinned model settings
 
 
@@ -129,7 +122,6 @@ class TaskRun(BaseModel):
     instance_id: str
     status: str = "pending"  # pending, ok, timeout or error
     patch: str = ""
-    trajectory: str = ""
     seconds: float = 0.0
     metrics: TaskMetrics = Field(default_factory=TaskMetrics)
     images: dict[str, str] = Field(default_factory=dict)  # image tag -> sha256 digest
@@ -143,7 +135,6 @@ class Node(BaseModel):
     name: str
     parent: str | None = None
     title: str | None = None  # the variant card's title
-    diff_summary: str | None = None  # files changed vs the parent's package
     dataset: DatasetSpec
     harness: str
     harness_version: str

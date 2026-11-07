@@ -11,8 +11,6 @@ from rsi import core, views
 
 @dataclasses.dataclass
 class TaskEvents:
-    requests: int = 0
-    input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     reasoning_tokens: int = 0
@@ -24,7 +22,7 @@ class TaskEvents:
     tool_ms: int = 0
     tool_stats: dict[str, dict] = dataclasses.field(default_factory=dict)
     final_event: str = ""
-    acted: int = 0  # times the variant logged that it acted
+    acted: int = 0  # times the variant said it kicked in
 
 
 # what a variant appends with pi.appendEntry when it acts (named in HARNESS.md)
@@ -77,8 +75,6 @@ def parse_events(events: Path, seconds: float = 0.0) -> TaskEvents:
                 continue
             asked_ms = message.get("timestamp") or asked_ms
             usage = message.get("usage") or {}
-            ev.requests += 1
-            ev.input_tokens += usage.get("input", 0)
             ev.output_tokens += usage.get("output", 0)
             ev.cache_read_tokens += usage.get("cacheRead", 0)
             ev.reasoning_tokens += usage.get("reasoning", 0) or 0
@@ -392,7 +388,7 @@ def _full_entry(index: int, message: dict, results: dict[str, dict]) -> _Entry:
     return entry
 
 
-def transcript(events: Path, full: bool = False, max_chars: int = TRANSCRIPT_MAX_CHARS) -> str:
+def transcript(events: Path, full: bool = False) -> str:
     # assistant messages (dict) and one-line notes (str), in order
     items: list[dict | str] = []
     results: dict[str, dict] = {}
@@ -434,7 +430,7 @@ def transcript(events: Path, full: bool = False, max_chars: int = TRANSCRIPT_MAX
                 entries.append(_turn_entry(index=turn, message=item, results=results, last=i == last_turn))
         else:
             entries.append(_Entry(lines=[f"    [{item}]"]))
-    kept = entries if full else _fit(entries=entries, max_chars=max_chars)
+    kept = entries if full else _fit(entries=entries, max_chars=TRANSCRIPT_MAX_CHARS)
     head = ""
     if task:
         head = f"## task message\n{task}\n" if full else f"task: {_clip(text=task, limit=TASK_GLIMPSE_CHARS)}\n\n"

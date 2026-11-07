@@ -80,7 +80,7 @@ Each harness pins the contract as far as its extension model allows:
   instrumentation's environment, all in-process, so `check-variant` rejects packages that use those surfaces, and
   `settings.json` only takes the keys about how the agent works and the display (no model, provider, thinking
   level or thinking budget, no proxy, no code or files from outside the package). Every request is audited where it
-  leaves the container: the model proxy on the sandbox network logs each one's parameters (not its messages) and the
+  leaves the container: the forwarder on the sandbox network logs each one's parameters (not its messages) and the
   usage the server reports, and each task keeps its container's share in `requests.jsonl`. So nested calls
   (`ctx.modelRegistry`) and second `pi` processes are checked against the pinned spec like the agent's own requests
   (`contract_violations` on each task, which also flags keys pi doesn't send) and count toward the task's requests and

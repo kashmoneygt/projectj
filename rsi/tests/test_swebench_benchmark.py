@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from swebench.image_builder import docker_build
+from swebench.task import checks
 
 from rsi import benchmarks, core, folders, paths
 
@@ -21,7 +22,12 @@ def _tasks_repo(root: Path) -> Path:
 def test_report_path_and_read(tmp_path: Path) -> None:
     path = mod.report_path(cwd=tmp_path, model_name="gemma-4-12b", run_id="node-a")
     assert path.name == "gemma-4-12b.node-a.json"
-    report = {"resolved_ids": ["a__b-1"], "submitted_ids": ["a__b-1", "c__d-2", "e__f-3"], "error_ids": ["e__f-3"]}
+    report = {
+        "resolved_ids": ["a__b-1"],
+        "submitted_ids": ["a__b-1", "c__d-2", "e__f-3", "g__h-4"],
+        "error_ids": ["e__f-3"],
+        "infra_failure_ids": ["g__h-4"],
+    }
     path.write_text(json.dumps(report))
     assert mod.read_report(cwd=tmp_path, model_name="gemma-4-12b", run_id="node-a") == {
         "a__b-1": True,
@@ -39,7 +45,7 @@ def test_by_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(benchmarks, "rows", lambda spec: rows)
     picked = mod.BENCHMARK.by_ids(ids=["c__d-2", "a__b-1"])
     assert [i.instance_id for i in picked] == ["c__d-2", "a__b-1"]
-    assert picked[0].base_commit == "c2"
+    assert (picked[0].image, picked[0].workdir) == (checks.expected_image(instance_id="c__d-2"), "/testbed")
     assert picked[0].task == "Please resolve this issue:\n\np2"
     with pytest.raises(ValueError, match="x__y-9"):
         mod.BENCHMARK.by_ids(ids=["x__y-9"])
@@ -50,10 +56,22 @@ def test_command_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _tasks_repo(root=tmp_path)
     calls: list[list[str]] = []
     monkeypatch.setattr(mod, "run_sb", lambda args, cwd: calls.append(args))
-    instance = core.Instance(instance_id="django__django-1", repo="r", base_commit="c", task="p")
+    instance = core.Instance(instance_id="django__django-1", repo="r", image="img", workdir="/testbed", task="p")
 
     mod.BENCHMARK.build_images(instances=[instance], workers=2, cwd=tmp_path)
-    assert calls[-1] == ["images", "build", str(repo), "-d", "verified", "-j", "2", "-i", "django__django-1"]
+    assert calls[-1] == [
+        "images",
+        "build",
+        str(repo),
+        "-d",
+        "verified",
+        "-n",
+        "swebench",
+        "-j",
+        "2",
+        "-i",
+        "django__django-1",
+    ]
 
     mod.BENCHMARK.gold(instance_id="sympy__sympy-20590", run_id="gold-check", cwd=tmp_path)
     assert calls[-1][:3] == ["eval", "verified", "--gold"]
@@ -61,32 +79,55 @@ def test_command_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls[-1][calls[-1].index("--task-repo") + 1] == str(repo)
 
 
-def test_tasks_repo_clone_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_tasks_repo_is_cloned_once_at_its_pinned_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     with pytest.raises(FileNotFoundError, match="--clone-tasks"):
         mod.BENCHMARK.ensure_assets(clone=False)
+    ran: list[list[str]] = []
+    head = mod.TASKS_COMMIT
 
-    def fake_run(cmd: list[str], check: bool) -> None:
-        _tasks_repo(root=tmp_path)
+    def fake_run(
+        cmd: list[str], check: bool, capture_output: bool = False, text: bool = False
+    ) -> subprocess.CompletedProcess:
+        ran.append(cmd)
+        if cmd[:2] == ["git", "clone"]:
+            _tasks_repo(root=tmp_path)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"{head}\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    repo = mod.tasks_repo(clone=True)
-    assert repo == tmp_path / "swe-bench-tasks"
-    assert mod.tasks_repo(clone=False) == repo
+    mod.BENCHMARK.ensure_assets(clone=True)
+    assert ran[2] == ["git", "-C", str(mod.tasks_repo()), "checkout", "--quiet", mod.TASKS_COMMIT]
+    mod.BENCHMARK.ensure_assets(clone=False)
+    head = "0" * 40
+    with pytest.raises(RuntimeError, match=f"not {mod.TASKS_COMMIT[:12]}"):
+        mod.BENCHMARK.ensure_assets(clone=False)
 
 
-def test_score_persists_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_score_persists_report_and_grades_the_graders_failures_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     repo = _tasks_repo(root=tmp_path)
     calls: list[list[str]] = []
+    logs = tmp_path / "logs" / "run_evaluation" / "node-a" / "gemma-4-12b"
 
     def fake_run_sb(args: list[str], cwd: Path) -> None:
         calls.append(args)
+        for iid in ("a__b-1", "c__d-2", "e__f-3"):
+            (logs / iid).mkdir(parents=True)
         mod.report_path(cwd=cwd, model_name="gemma-4-12b", run_id="node-a").write_text(
-            json.dumps({"resolved_ids": ["a__b-1"], "submitted_ids": ["a__b-1", "c__d-2"], "error_ids": []})
+            json.dumps(
+                {
+                    "resolved_ids": ["a__b-1"],
+                    "submitted_ids": ["a__b-1", "c__d-2", "e__f-3"],
+                    "error_ids": [],
+                    "infra_failure_ids": ["e__f-3"],
+                }
+            )
         )
 
     monkeypatch.setattr(mod, "run_sb", fake_run_sb)
+    monkeypatch.setattr(mod, "unbuilt", lambda preds: [])
     node_dir = tmp_path / "node"
     node_dir.mkdir()
     per_instance = mod.BENCHMARK.score(
@@ -100,9 +141,49 @@ def test_score_persists_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     )
     assert per_instance == {"a__b-1": True, "c__d-2": False}
     assert (node_dir / "gemma-4-12b.node-a.json").exists()
+    assert not (logs / "e__f-3").exists() and (node_dir / "instances" / "c__d-2" / "eval").is_dir()
     assert calls[-1][:3] == ["eval", "verified", "-p"]
     assert calls[-1][calls[-1].index("--run-id") + 1] == "node-a"
     assert calls[-1][calls[-1].index("--task-repo") + 1] == str(repo)
+
+
+def test_scoring_refuses_a_task_whose_image_isnt_built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mod, "unbuilt", lambda preds: ["a__b-1"])
+    monkeypatch.setattr(mod, "run_sb", lambda args, cwd: pytest.fail("the eval would build the image"))
+    with pytest.raises(RuntimeError, match="a__b-1"):
+        mod.BENCHMARK.score(
+            preds=tmp_path / "preds.json",
+            run_id="r",
+            model_name="m",
+            workers=2,
+            cwd=tmp_path,
+            node_dir=tmp_path,
+            instances_dir=tmp_path,
+        )
+
+
+def test_unbuilt_names_the_tasks_with_a_patch_and_no_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    preds = tmp_path / "preds.json"
+    patches = {"a__b-1": "+x", "c__d-2": "+y", "e__f-3": ""}
+    preds.write_text(json.dumps({iid: {"model_patch": patch} for iid, patch in patches.items()}))
+    built = {mod.task_image(instance_id="a__b-1")}
+
+    class _Images:
+        def get(self, name: str) -> object:
+            if name not in built:
+                raise mod.docker.errors.ImageNotFound(name)
+            return object()
+
+    class _Client:
+        images = _Images()
+
+    monkeypatch.setattr(mod.docker, "from_env", lambda: _Client())
+    assert mod.unbuilt(preds=preds) == ["c__d-2"]
+
+
+def test_a_tasks_image_has_the_name_the_eval_looks_up() -> None:
+    expected = "swebench/sweb.eval.x86_64.django_1776_django-11001:latest"
+    assert mod.task_image(instance_id="Django__django-11001") == expected
 
 
 def test_persist_eval_artifacts(tmp_path: Path) -> None:

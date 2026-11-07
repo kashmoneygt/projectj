@@ -3,6 +3,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ MCP_TIMEOUT_MS = 3_700_000  # a container command may take an hour (Copilot's de
 # a separate Copilot home, so the user's history, skills, plugins and MCP servers stay out (only the login is borrowed)
 HOME = Path(os.environ.get("RSI_TEACHER_HOME", str(Path.home() / ".cache" / "rsi" / "copilot")))
 CLIP_CHARS = 6_000  # per tool call and result in the transcript
-# the kind of tool each container tool is, by the names the viewer knows (Copilot names them <server>-<tool>)
+# what kind of tool each container tool is, for the viewer (Copilot calls them <server>-<tool>)
 _KINDS = {"bash": "bash", "read_file": "read", "write_file": "write", "edit_file": "edit"}
 
 
@@ -33,7 +34,12 @@ class CopilotTeacher:
     ) -> teacher.TeacherRun:
         out_dir.mkdir(parents=True, exist_ok=True)
         cwd = _home()
-        server = {"type": "local", "command": "python3", "args": [container_mcp.__file__, container], "tools": ["*"]}
+        server = {
+            "type": "local",
+            "command": sys.executable,
+            "args": [container_mcp.__file__, container],
+            "tools": ["*"],
+        }
         config = out_dir / "mcp.json"
         config.write_text(json.dumps({"mcpServers": {"container": {**server, "timeout": MCP_TIMEOUT_MS}}}, indent=2))
         command = [
