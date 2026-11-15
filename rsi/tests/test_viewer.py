@@ -112,8 +112,8 @@ def lineage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, core.N
         parent_node="root",
         card=card,
         diff="+ APPEND_SYSTEM.md",
-        area="tools",
         round="20261027-163053",
+        session=1,
     )
     waiting = cards.VariantCard(title="Not run yet", what="h")
     variants.tree_register(name="later", parent="baseline", parent_node="root", card=waiting, diff="+ x")
@@ -124,7 +124,6 @@ def lineage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, core.N
 
 def test_the_tree_is_harnesses_with_their_runs_and_how_each_did(lineage: dict[str, core.Node]) -> None:
     data = viewer.tree_data()
-    assert set(data["areas"]) == {"open", *generation.AREAS, "compose"}
     (found,) = data["lineages"]
     assert (found["model"], found["harness"], found["root"]["name"]) == ("qwen-3.8-27b", "pi 1.4.0", "root")
     assert (found["made"], found["ran"], found["better"], found["probe"], found["best"]) == (2, 1, 0, None, None)
@@ -140,13 +139,6 @@ def test_the_tree_is_harnesses_with_their_runs_and_how_each_did(lineage: dict[st
     assert cap["standing"]["solves"]["gain"] == 1.0 and cap["standing"]["runs"] == 1
     assert cap["standing"]["better_by"] == ""
     assert (later["runs"], later["href"], later["standing"]) == ([], "#variant/later", None)
-
-
-def test_the_tree_shows_a_variants_whole_title(lineage: dict[str, core.Node]) -> None:
-    title = "Cap thinking" + " and keep going" * 10
-    (paths.variants_dir() / "cap" / cards.FILE).write_text(f"{title}\nWhat: w\n")
-    (found,) = viewer.tree_data()["lineages"]
-    assert len(title) > cards.TITLE_MAX and found["tree"]["children"][0]["title"] == title
 
 
 def test_the_tree_names_the_variant_that_solved_the_most_on_the_probe_set(lineage: dict[str, core.Node]) -> None:
@@ -173,7 +165,7 @@ def test_a_run_shows_its_numbers_next_to_its_parents_runs(lineage: dict[str, cor
     assert viewer._brief(path=str(asked), stamp=1.0, lead=lead) == "float16 gets upgraded"
     assert data["card"]["what"] == "h" and "Keep your thinking short." in data["diff"]
     assert data["card"]["result"][:3] == [
-        "from root, area tools",
+        "from root",
         "1 run, 2.0/2 solved per run",
         "solved +1.0 ± 0.7 tasks per run, within noise (1 run vs 2 of the parent, 2 tasks)",
     ]
@@ -296,18 +288,20 @@ def test_the_server_answers_json(lineage: dict[str, core.Node]) -> None:
 
 def test_a_session_shows_what_its_checks_made_of_it(lineage: dict[str, core.Node]) -> None:
     round_dir = paths.node_dir(name="root") / "generations" / "20261027-163053"
-    session = round_dir / "session-1-tools"
+    session = round_dir / "session-1"
     (session / "out" / "variants").mkdir(parents=True)
     (session / "prompt.md").write_text("You are improving pi.")
     (session / "events.jsonl").write_text("\n".join(_events()))
     teacher = {"name": "opus", "agent": "copilot", "model": "m", "effort": "max"}
-    (round_dir / generation.ROUND).write_text(json.dumps({"teacher": teacher, "areas": ["tools"]}))
-    (round_dir / "checks" / "session-1-tools" / "cap").mkdir(parents=True)
-    pushy = round_dir / "checks" / "session-1-tools" / "pushy"
+    (round_dir / generation.ROUND).write_text(json.dumps({"teacher": teacher, "sessions": 1}))
+    (round_dir / "checks" / "session-1" / "cap").mkdir(parents=True)
+    pushy = round_dir / "checks" / "session-1" / "pushy"
     (pushy / "question").mkdir(parents=True)
     (pushy / "check.log").write_text("ok: pi loads the package\n")
     (pushy / "question" / "javascript.log").write_text("problem: the agent answered, and the package made it go on\n")
-    (pushy / "PROBLEMS.md").write_text("- javascript question: the agent answered, and the package made it go on\n")
+    (pushy / generation.PROBLEMS).write_text(
+        '["javascript question: the agent answered, and the package made it go on"]'
+    )
     data = viewer.session_data(node_name="root", round_id="20261027-163053", session=1)
     assert data["instructions"] == "You are improving pi."
     assert data["outcome"]["status"] == "registered" and data["outcome"]["registered"] == ["cap"]
@@ -318,7 +312,7 @@ def test_a_session_shows_what_its_checks_made_of_it(lineage: dict[str, core.Node
     )
     rounds = viewer.node_data(name="root")["rounds"]
     assert rounds[0]["registered"] == 1 and rounds[0]["live"] is False
-    assert (rounds[0]["sessions"][0]["n"], rounds[0]["sessions"][0]["area"]) == (1, "tools")
+    assert rounds[0]["sessions"][0]["n"] == 1
 
 
 def test_parse_patch_counts_and_lines() -> None:

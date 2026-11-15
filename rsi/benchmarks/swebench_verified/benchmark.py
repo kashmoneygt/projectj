@@ -17,6 +17,18 @@ _TASKS_REPO_URL = "https://github.com/SWE-bench/swe-bench-tasks.git"
 TASKS_COMMIT = "3d07b464b7b311a0cbfb5ed5b2d8a3b96f84a33d"  # swe-bench-tasks commit that builds and grades every task
 NAMESPACE = "swebench"  # prefix of the image names swebench's eval looks for
 WORKDIR = "/testbed"  # where each task's repo is in its image
+# Each image's last commit and git's user are named SWE-bench, which tells the agent it's being tested. This renames
+# them without naming the benchmark, since the agent can see this script in its process list. The commit only
+# re-records file modes, so the patch still applies when it's graded in the original image.
+SETUP = (
+    'if [ "$(git log -1 --format=%an)" = "$(git config --global user.name)" ]; then\n'
+    "  git -c user.name=dev -c user.email=dev@localhost commit --amend --allow-empty --no-verify --quiet "
+    "--reset-author -m 'Normalize file modes'\n"
+    "fi\n"
+    "git config --global user.name dev\n"
+    "git config --global user.email dev@localhost\n"
+    "git reflog expire --expire=now --all\n"
+)
 # swebench's CLI, but building only missing eval images
 SB_COMMAND = [sys.executable, str(Path(__file__).with_name("swebench_cli.py"))]
 EVAL_LOG_MAX = 18_000  # characters of the test log the viewer shows (failures first, then the end)
@@ -71,7 +83,9 @@ def read_report(cwd: Path, model_name: str, run_id: str) -> dict[str, bool]:
     """Whether each task resolved, leaving out the ones the grader failed on"""
     data = json.loads(report_path(cwd=cwd, model_name=model_name, run_id=run_id).read_text())
     resolved_ids = set(data["resolved_ids"])
-    ungraded = set(data["error_ids"]) | set(data["infra_failure_ids"])
+    # tests that hang past the time limit fail the task, since grading it again hangs again
+    timed_out = {iid for iid, why in data["failure_reasons"].items() if why == "tests_timed_out"}
+    ungraded = (set(data["error_ids"]) | set(data["infra_failure_ids"])) - timed_out
     return {iid: iid in resolved_ids for iid in data["submitted_ids"] if iid not in ungraded}
 
 
@@ -88,13 +102,14 @@ def persist_eval_artifacts(src: Path, instances_dir: Path) -> int:
     return copied
 
 
-def _instance(row: dict, request: str) -> core.Instance:
+def _instance(row: dict, dataset: core.DatasetSpec) -> core.Instance:
     return core.Instance(
         instance_id=row["instance_id"],
         repo=row["repo"],
         image=task_image(instance_id=row["instance_id"]),
         workdir=WORKDIR,
-        task=request.replace("{task}", row["problem_statement"].strip()),
+        task=dataset.request.replace("{task}", row["problem_statement"].strip()),
+        setup=dataset.setup,
     )
 
 
@@ -106,7 +121,9 @@ class SweBenchVerified:
         dataset_id="princeton-nlp/SWE-bench_Verified",
         revision="c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
         request="Please resolve this issue:\n\n{task}",
+        setup=SETUP,
     )
+    work = "issues from public Python projects"
     protocol_terms = (
         "swebench",
         "swe-bench",
@@ -159,14 +176,14 @@ class SweBenchVerified:
         if 0 < tasks < len(ids):
             repos = {iid: row["repo"] for iid, row in rows.items()}
             ids = benchmarks.spread(ids=ids, repos=repos, count=tasks, seed=seed)
-        return [_instance(row=rows[iid], request=self.dataset.request) for iid in ids]
+        return [_instance(row=rows[iid], dataset=self.dataset) for iid in ids]
 
     def by_ids(self, ids: list[str]) -> list[core.Instance]:
         rows = {r["instance_id"]: r for r in benchmarks.rows(spec=self.dataset)}
         unknown = [i for i in ids if i not in rows]
         if unknown:
             raise ValueError(f"unknown instance id(s) for {self.name}: {unknown[:5]}")
-        return [_instance(row=rows[i], request=self.dataset.request) for i in ids]
+        return [_instance(row=rows[i], dataset=self.dataset) for i in ids]
 
     def build_images(self, instances: list[core.Instance], workers: int, cwd: Path) -> None:
         args = ["images", "build", str(tasks_repo()), "-d", self.alias, "-n", NAMESPACE, "-j", str(workers)]

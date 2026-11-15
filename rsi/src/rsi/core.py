@@ -17,6 +17,7 @@ class DatasetSpec(Frozen):
     split: str = "test"
     revision: str = ""  # pinned HF dataset revision
     request: str = "{task}"  # how a task is put to the agent; {task} is the task's own text
+    setup: str = ""  # shell commands run in the task's repo before the agent starts
 
     @property
     def lead(self) -> str:
@@ -80,6 +81,7 @@ class Instance(Frozen):
     image: str  # docker image the task runs and gets graded in
     workdir: str  # where the task's repo is in that image
     task: str  # the message the agent gets, as a user would write it
+    setup: str = ""  # shell commands run in the repo before the agent starts
 
 
 class ToolStat(BaseModel):

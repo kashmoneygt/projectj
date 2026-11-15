@@ -144,6 +144,9 @@ def test_runs_compare_across_ports_but_not_across_model_settings() -> None:
     asked = _scored(name="asked", parent="root", variant="", outcomes=probe, created=5.0)
     asked.dataset = asked.dataset.model_copy(update={"request": "Please do this:\n\n{task}"})
     assert not tree.comparable(a=reordered, b=asked)
+    set_up = _scored(name="set-up", parent="root", variant="", outcomes=probe, created=6.0)
+    set_up.dataset = set_up.dataset.model_copy(update={"setup": "git config --global user.name dev\n"})
+    assert not tree.comparable(a=reordered, b=set_up)
 
 
 def test_runs_made_differently_say_what_differs() -> None:

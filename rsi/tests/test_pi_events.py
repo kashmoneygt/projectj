@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from rsi import folders, paths
+from rsi import core, folders, paths
 
 pi_events = folders.module(root=paths.harnesses_dir(), name="pi", file="events.py")
 
@@ -55,16 +55,20 @@ def test_a_tool_call_still_running_at_the_end_counts_until_the_run_ended(tmp_pat
             {"type": "message_end", "message": {"role": "assistant", "timestamp": 61_000, "usage": {"output": 5}}},
             {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "read"},
             {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read", "durationMs": 40},
-            {"type": "message_end", "message": {"role": "assistant", "timestamp": 121_000, "usage": {"output": 5}}},
+            # asked for at 121 s, the response took 20 s, so its call started at 141 s
+            {
+                "type": "message_end",
+                "message": {"role": "assistant", "timestamp": 121_000, "durationMs": 20_000, "usage": {"output": 5}},
+            },
             {"type": "tool_execution_start", "toolCallId": "c2", "toolName": "bash"},
         ],
     )
     ev = pi_events.parse_events(events=events, seconds=3600.0)
     assert ev.tool_stats == {
         "read": {"count": 1, "errors": 0, "ms": 40},
-        "bash": {"count": 1, "errors": 0, "ms": 3_480_000},
+        "bash": {"count": 1, "errors": 0, "ms": 3_460_000},
     }
-    assert ev.tool_ms == 3_480_040
+    assert ev.tool_ms == 3_460_040
     assert pi_events.parse_events(events=events).tool_ms == 40
 
 
@@ -83,18 +87,49 @@ def test_parse_events_counts_when_the_variant_acted(tmp_path: Path) -> None:
     assert pi_events.parse_events(events=events).acted == 2
 
 
-def test_parse_breakdown_picks_largest_request(tmp_path: Path) -> None:
-    metrics = tmp_path / "metrics.jsonl"
+def test_a_trajectory_shows_the_messages_a_package_added_and_its_edits(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    review = [{"type": "text", "text": "Check the diff."}]
+    edit = {"type": "context_edit", "targetId": "b", "replacement": {"content": ""}}
     _write(
-        path=metrics,
+        path=events,
         records=[
-            {"ts": 1, "system_tokens": 100, "tool_def_tokens": 300, "message_tokens": 50},
-            {"type": "timing", "ts": 2, "ttft_ms": 120, "gen_ms": 900, "stop_reason": "toolUse"},
-            {"ts": 3, "system_tokens": 100, "tool_def_tokens": 300, "message_tokens": 400},
+            {"type": "message_end", "message": {"role": "user", "content": "Fix it", "timestamp": 1000}},
+            # pi.sendMessage's messages come as messages, and a turn_end or agent_before_settle result's as entries
+            {"type": "message_end", "message": {"role": "custom", "customType": "nudge", "content": "Run the tests."}},
+            {"type": "entry_appended", "entry": {"type": "custom_message", "customType": "review", "content": review}},
+            {"type": "entry_appended", "entry": {"type": "context_edit", "targetId": "a", "replacement": None}},
+            {"type": "entry_appended", "entry": edit},
+            {"type": "entry_appended", "entry": {"type": "custom", "customType": pi_events.ACTED_ENTRY, "data": {}}},
         ],
     )
-    assert pi_events.parse_breakdown(metrics=metrics) == (100, 300, 400)
-    assert pi_events.parse_breakdown(metrics=tmp_path / "missing.jsonl") == (0, 0, 0)
+    view = pi_events.trajectory(events=events, metrics=tmp_path / "metrics.jsonl")
+    assert view.user == "Fix it"
+    assert [item.text for item in view.items] == [
+        "harness message (nudge): Run the tests.",
+        "harness message (review): Check the diff.",
+        "an earlier message was dropped from the context",
+        "an earlier message was changed in the context",
+    ]
+
+
+def test_task_metrics_take_the_largest_request_and_add_up_the_timing(tmp_path: Path) -> None:
+    model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
+    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    assert (m.system_tokens, m.ttft_first_ms, m.ttft_avg_ms, m.model_ms, m.stop_reason) == (0, 0.0, 0.0, 0, "")
+    _write(
+        path=tmp_path / "metrics.jsonl",
+        records=[
+            {"ts": 1, "system_tokens": 100, "tool_def_tokens": 300, "message_tokens": 50},
+            {"type": "timing", "ts": 2, "ttft_ms": 120, "gen_ms": 900, "think_ms": 400, "stop_reason": "toolUse"},
+            {"ts": 3, "system_tokens": 100, "tool_def_tokens": 300, "message_tokens": 400},
+            {"type": "timing", "ts": 4, "ttft_ms": 300, "gen_ms": 1500, "think_ms": 100, "stop_reason": "stop"},
+        ],
+    )
+    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    assert (m.system_tokens, m.tool_def_tokens, m.message_tokens) == (100, 300, 400)
+    assert (m.ttft_first_ms, m.ttft_avg_ms, m.ttft_max_ms) == (120.0, 210.0, 300.0)
+    assert (m.model_ms, m.think_ms, m.stop_reason) == (2400, 500, "stop")
 
 
 def test_model_error(tmp_path: Path) -> None:
@@ -132,17 +167,3 @@ def test_has_model_output(tmp_path: Path) -> None:
         ],
     )
     assert pi_events.has_model_output(events=events) is True
-
-
-def test_parse_timing(tmp_path: Path) -> None:
-    metrics = tmp_path / "metrics.jsonl"
-    _write(
-        path=metrics,
-        records=[
-            {"ts": 1, "system_tokens": 100, "tool_def_tokens": 300, "message_tokens": 50},
-            {"type": "timing", "ts": 2, "ttft_ms": 120, "gen_ms": 900, "think_ms": 400, "stop_reason": "toolUse"},
-            {"type": "timing", "ts": 3, "ttft_ms": 300, "gen_ms": 1500, "think_ms": 100, "stop_reason": "stop"},
-        ],
-    )
-    assert pi_events.parse_timing(metrics=metrics) == (120.0, 210.0, 300.0, 2400, 500, "stop")
-    assert pi_events.parse_timing(metrics=tmp_path / "missing.jsonl") == (0.0, 0.0, 0.0, 0, 0, "")

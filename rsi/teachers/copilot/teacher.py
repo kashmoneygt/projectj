@@ -10,13 +10,13 @@ from pathlib import Path
 
 from rsi import folders, paths, teacher, views
 
-COPILOT = os.environ.get("RSI_COPILOT_BIN", "copilot")
+COPILOT = "copilot"
 container_mcp = folders.module(root=paths.teachers_dir(), name="copilot", file="container_mcp.py", kind="MCP server")
 # only the container's tools, since Copilot's own reach the host and the internet
 TOOLS = ("container-bash", "container-read_file", "container-write_file", "container-edit_file")
 MCP_TIMEOUT_MS = 3_700_000  # a container command may take an hour (Copilot's default is 5 minutes)
 # a separate Copilot home, so the user's history, skills, plugins and MCP servers stay out (only the login is borrowed)
-HOME = Path(os.environ.get("RSI_TEACHER_HOME", str(Path.home() / ".cache" / "rsi" / "copilot")))
+HOME = Path.home() / ".cache" / "rsi" / "copilot"
 CLIP_CHARS = 6_000  # per tool call and result in the transcript
 # what kind of tool each container tool is, for the viewer (Copilot calls them <server>-<tool>)
 _KINDS = {"bash": "bash", "read_file": "read", "write_file": "write", "edit_file": "edit"}
@@ -34,10 +34,12 @@ class CopilotTeacher:
     ) -> teacher.TeacherRun:
         out_dir.mkdir(parents=True, exist_ok=True)
         cwd = _home()
+        # the tools end each result with the time left, since the teacher misreads the clock
+        deadline = time.time() + timeout_s
         server = {
             "type": "local",
             "command": sys.executable,
-            "args": [container_mcp.__file__, container],
+            "args": [container_mcp.__file__, container, f"{deadline:.0f}"],
             "tools": ["*"],
         }
         config = out_dir / "mcp.json"

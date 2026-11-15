@@ -43,7 +43,6 @@ background:var(--panel);color:var(--ink)}
 
 /* the tree */
 .lineage{margin:18px 0 28px}
-.lin-h{font-size:12.5px;color:var(--muted);margin:0 0 8px 2px;text-transform:uppercase;letter-spacing:.04em}
 .tree,.tree ul{list-style:none;margin:0;padding:0}
 .tree ul{margin-left:22px;padding-left:22px;border-left:1.5px solid var(--line)}
 .tree li{position:relative;margin:8px 0}
@@ -92,12 +91,8 @@ font-size:12px;color:var(--muted);background:var(--panel);font-variant-numeric:t
 .n-score .vs{font-size:12px;color:var(--muted);margin-top:3px}
 .sgbox{overflow-x:auto}
 .sg{min-width:640px;margin-top:2px}
-.sgr{display:grid;grid-template-columns:84px minmax(0,1fr) clamp(150px,22%,260px) 192px}
+.sgr{display:grid;grid-template-columns:minmax(0,1fr) clamp(150px,22%,260px) 192px}
 .sgr.h>div:not(.plot){align-self:center}
-.sgr>.lead{grid-column:span 2}
-.sgr>.vt{padding-right:2px}
-.vtype{display:inline-block;font-size:11px;line-height:18px;padding:0 6px;border-radius:9px;background:var(--hover);
-cursor:default;white-space:nowrap}
 .sgr>div{min-width:0;padding:9px 10px 9px 8px}
 .sgr>.plot{position:relative;padding:0}
 .sgr>.plot>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
@@ -154,10 +149,6 @@ max-height:calc(100vh - 64px);background:var(--panel);color:var(--ink);box-shado
 /* panels */
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0}
 .panel h2{font-size:15px;margin:0 0 10px;font-weight:620}
-.hero{display:grid;grid-template-columns:1fr auto;gap:16px}
-.hero .t1{font-size:17px;font-weight:620;margin:0 0 4px}
-.hero .t2{color:var(--muted);font-size:13px;overflow-wrap:anywhere}
-.hero .t2 a{color:var(--accent)}
 .cmp{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;font-variant-numeric:tabular-nums}
 .cmp td,.cmp th{padding:5px 8px;border-top:1px solid var(--line);text-align:right}
 .cmp th{color:var(--muted);font-weight:500}
@@ -185,9 +176,8 @@ white-space:nowrap}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--faint)}
 .dot.passed,.dot.ok,.dot.registered,.dot.done{background:var(--ok)}
 .dot.failed,.dot.bad,.dot.error,.dot.err,.dot.rejected{background:var(--bad)}
-.dot.warn,.dot.declined,.dot.unscored,.dot.timeout{background:var(--warn)}
+.dot.warn,.dot.unscored,.dot.timeout,.dot.stopped{background:var(--warn)}
 .dot.running,.dot.scoring{background:var(--accent);animation:pulse 2s infinite}
-.dot.stopped{background:var(--warn)}
 .flip{font-size:11.5px;padding:1px 7px;border-radius:999px}
 .flip.fixed{background:var(--ok-bg);color:var(--ok)}.flip.broken{background:var(--bad-bg);color:var(--bad)}
 .flip.tmo{background:var(--warn-bg);color:var(--warn)}.flip.hid{background:var(--hover);color:var(--muted)}
@@ -269,7 +259,7 @@ details>summary:hover{color:var(--ink)}
 .flips .same td:first-child{color:var(--muted)}
 @media (max-width:640px){.node{grid-template-columns:12px 1fr}.n-score{grid-column:2;text-align:left}
 .row>.head{grid-template-columns:12px 1fr}.stats{grid-column:2;gap:10px}.bubble{max-width:96%}
-.step{grid-template-columns:1fr}.hero{grid-template-columns:1fr}}
+.step{grid-template-columns:1fr}}
 </style></head>
 <body>
 <header class="top"><div class="top-in">
@@ -322,6 +312,9 @@ const signedPct = (x) => {
   return (p > 0 ? '+' : p < 0 ? '−' : '') + Math.abs(p) + '%';
 };
 const pct = (a, b) => (b ? Math.round((100 * (a - b)) / b) : 0);
+// beyond noise either way, like stats.NOISE_Z
+const tone = (z) => (z >= 2 ? 'good' : z <= -2 ? 'bad' : '');
+const tokenNoise = (z) => (z >= 2 ? 'fewer beyond noise' : z <= -2 ? 'more beyond noise' : 'within noise');
 const when = (t) => new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit',
   minute: '2-digit' });
 const fmtRound = (id) => {
@@ -470,10 +463,10 @@ function lineageHtml(l) {
   }
   tiles.push(tile('Variants', String(l.made), l.made ? l.ran + ' run · ' + l.better + ' better than their parent' : ''));
   if (l.best) {
-    const b = l.best, cls = b.solves.z >= 2 ? 'good' : b.solves.z <= -2 ? 'bad' : '';
+    const b = l.best;
     tiles.push(tile('Most solved', num(b.solved) + '<span>/' + b.of + ' per run</span>', esc(b.name) + ' · '
       + signed(b.solves.gain, 1) + ' ± ' + b.solves.se.toFixed(1) + ' vs the baseline\'s ' + num(b.baseline) + ' · '
-      + esc(b.solves.verdict), cls));
+      + esc(b.solves.verdict), tone(b.solves.z)));
   }
   tiles.push(tile('Agent time', l.hours.toFixed(1) + '<span> h</span>', 'over ' + count(l.tree) + ' runs'));
   const views = '<div class="seg home-view">' + [['graph', 'Graph'], ['cards', 'Cards']].map(([v, label]) => '<button '
@@ -499,14 +492,6 @@ function branch(xp, xk, cls) {
 // a round's id is the local time it started, like 20261029-194105
 const roundDay = (id) => new Date(+id.slice(0, 4), +id.slice(4, 6) - 1, +id.slice(6, 8))
   .toLocaleDateString([], { month: 'short', day: 'numeric' });
-// the kind of variant a teacher session was asked for, with that session's brief on hover
-function areaTag(area, reuses) {
-  if (!area) return '';
-  const tip = '<div class="tt">' + esc(area) + '</div><div class="m">The teacher\'s brief for this type of variant:'
-    + '</div><div>' + esc(DATA.areas[area] ?? '') + '</div>'
-    + (reuses.length ? '<div class="m">Reuses ideas from ' + esc(reuses.join(', ')) + '</div>' : '');
-  return '<span class="vtype" data-tip="' + addTip(tip) + '">' + esc(area) + '</span>';
-}
 // "~ a.ts (+1 -2), + b.json" as files, each new, deleted or with its lines added and removed
 const changes = (summary) => summary.split(', ').map((part) => {
   const m = /^([+~-]) (.+?)(?: \(\+(\d+) -(\d+)\))?$/.exec(part);
@@ -585,16 +570,16 @@ function scoreGraph(l) {
       + '</button>';
     const scale = '<span class="seg scale">' + [['fit', fit.join('–')], ['full', '0–' + of]].map(button).join('')
       + '</span>';
-    return '<div class="sgr axis"><div class="lead">' + (top ? 'solved per run, of ' + of + ' tasks' + scale : '')
+    return '<div class="sgr axis"><div>' + (top ? 'solved per run, of ' + of + ' tasks' + scale : '')
       + '</div><div class="plot"><svg>' + ticks.map(tick).join('') + '</svg></div><div></div></div>';
   };
   const body = rows.map((r, i) => {
     if (r.from) {
-      return '<div class="sgr grp"><div class="lead">made from ' + esc(r.from.c.name) + (r.id ? ' on '
+      return '<div class="sgr grp"><div>made from ' + esc(r.from.c.name) + (r.id ? ' on '
         + roundDay(r.id) : '') + '</div>' + plot(i, '') + '<div></div></div>';
     }
     const row = r.live ? teacherRow(r.live, X(r.parent.x)) : harnessRow(r.n, X, root);
-    return '<div class="sgr h"><div class="vt">' + row.area + '</div><div>' + row.left + '</div>' + plot(i, row.own)
+    return '<div class="sgr h"><div>' + row.left + '</div>' + plot(i, row.own)
       + '<div class="nums">' + row.right + '</div></div>';
   });
   return '<section class="panel"><div class="sgbox"><div class="sg">' + axis(true) + body.join('') + axis(false)
@@ -621,11 +606,11 @@ function harnessRow(n, X, root) {
       + (n.parent && n.kids.length ? ' on' : '') + '" cx="' + X(n.x) + '%" cy="' + y + '" r="6.5"/></a>';
   }
   const files = c.changed ? '<div class="files"><span class="k">Code change:</span>' + filesHtml(c) + '</div>' : '';
+  const reuses = c.reuses.length ? '<div><span class="k">Reuses:</span> ' + esc(c.reuses.join(', ')) + '</div>' : '';
   return {
-    area: areaTag(c.area, c.reuses),
     left: '<div class="kv"><div><span class="k">Title:</span> <a href="' + esc(c.href) + '">' + esc(c.title)
-      + '</a></div><div><span class="k">ID:</span> <span class="id">' + esc(c.name) + '</span></div>' + files
-      + '</div>',
+      + '</a></div><div><span class="k">ID:</span> <span class="id">' + esc(c.name) + '</span></div>' + reuses
+      + files + '</div>',
     own,
     right: n.x == null ? '<span class="m">' + esc(waiting(c)) + '</span>' : scoresHtml(n, tips),
   };
@@ -651,7 +636,6 @@ function scoresHtml(n, tips) {
     h += '<div class="m">' + esc(r.label.split(' ').pop()) + ': ' + esc(runWhat(r)) + '</div>';
   });
   if (st) {
-    const tone = (z) => (z >= 2 ? 'good' : z <= -2 ? 'bad' : '');
     const line = (label, z, value) => '<div>' + label + ': <span class="' + tone(z) + '">' + value + '</span></div>';
     h += line('compared to parent', st.solves.z, signed(st.solves.gain, 1))
       + line('token usage', st.tokens.z, signedPct(st.tokens.change));
@@ -663,14 +647,13 @@ function scoresHtml(n, tips) {
 function harnessTip(n, root) {
   const c = n.c, st = c.standing, p = c.profile;
   const each = n.runs.map((r) => esc(r.label.split(' ').pop()) + ': <b>' + r.resolved + '</b>/' + r.total).join(' · ');
-  let h = '<div class="tt">' + esc(c.title) + '</div><div class="tm">' + esc(c.name)
-    + (c.area ? ' · ' + esc(c.area) : '') + '</div><div>' + each + '</div><div>' + num(n.x) + ' solved per run'
+  let h = '<div class="tt">' + esc(c.title) + '</div><div class="tm">' + esc(c.name) + '</div><div>' + each
+    + '</div><div>' + num(n.x) + ' solved per run'
     + (n.parent ? ', ' + signed(n.x - root.x, 1) + ' vs the baseline' : '') + '</div>';
   if (st) {
-    const noise = st.tokens.z >= 2 ? 'fewer beyond noise' : st.tokens.z <= -2 ? 'more beyond noise' : 'within noise';
     h += '<div>vs its parent ' + signed(st.solves.gain, 1) + ' ± ' + st.solves.se.toFixed(1) + ' solved per run ('
       + esc(st.solves.verdict) + ')' + (st.hidden ? ', hidden tasks ' + signed(st.hidden.gain, 1) : '') + '</div>'
-      + '<div>tokens ' + signedPct(st.tokens.change) + ' vs its parent (' + noise + ')</div>';
+      + '<div>tokens ' + signedPct(st.tokens.change) + ' vs its parent (' + tokenNoise(st.tokens.z) + ')</div>';
     if (st.problems.length) h += '<div class="bad">runs made differently: ' + esc(st.problems.join('; ')) + '</div>';
     if (st.broke) h += '<div class="bad">broke the contract on ' + st.broke + ' task runs</div>';
     if (st.better_by) h += '<div class="good">better than its parent on ' + esc(st.better_by) + '</div>';
@@ -685,7 +668,6 @@ function teacherRow(round, xp) {
   const s = round.sessions.find((x) => x.status === 'running') || round.sessions[round.sessions.length - 1];
   const href = '#node/' + enc(round.node) + '/gen/' + enc(round.id) + '/' + (s ? s.n : 1);
   return {
-    area: areaTag(s?.area ?? '', []),
     left: '<div class="kv"><div><span class="k">Title:</span> <a href="' + href + '">The teacher is writing '
       + 'variants</a></div><div><span class="k">Session:</span> ' + (s ? s.n : 1) + '</div></div>',
     own: branch(xp, xp, ' wait') + '<circle class="pt wait live" cx="' + xp + '%" cy="50%" r="5"/>',
@@ -795,21 +777,18 @@ function cardState(c) {
   return states.every((s) => s === 'done') ? 'done' : 'stopped';
 }
 function standingLine(s) {
-  const tone = (z) => (z >= 2 ? 'good' : z <= -2 ? 'bad' : '');
   const t = s.tokens;
   let h = '<span class="k">vs its parent</span><span class="' + tone(s.solves.z) + '">' + signed(s.solves.gain, 1)
     + ' ± ' + s.solves.se.toFixed(1) + ' solved per run, ' + esc(s.solves.verdict) + '</span>';
   if (s.hidden) h += '<span>' + signed(s.hidden.gain, 1) + ' on the hidden tasks</span>';
-  h += '<span class="' + tone(t.z) + '">tokens ' + signedPct(t.change) + ', '
-    + (t.z >= 2 ? 'fewer beyond noise' : t.z <= -2 ? 'more beyond noise' : 'within noise') + '</span>';
+  h += '<span class="' + tone(t.z) + '">tokens ' + signedPct(t.change) + ', ' + tokenNoise(t.z) + '</span>';
   if (s.problems.length) h += '<span class="bad">runs made differently: ' + esc(s.problems.join('; ')) + '</span>';
   if (s.broke) h += '<span class="bad">broke the contract on ' + s.broke + ' task runs</span>';
   return h;
 }
 function harnessCard(c) {
   const s = c.standing, p = c.profile;
-  const tags = (c.area ? '<span class="tag">' + esc(c.area) + '</span>' : '')
-    + (s && s.better_by ? '<span class="tag good">better on ' + esc(s.better_by) + '</span>' : '')
+  const tags = (s && s.better_by ? '<span class="tag good">better on ' + esc(s.better_by) + '</span>' : '')
     + (c.runs.length ? '' : '<span class="tag">not run yet</span>');
   const numbers = (p ? '<span>' + p.minutes.toFixed(1) + ' min/task</span><span>' + fmtTok(p.output_tokens)
     + ' tokens/task</span>' : '') + (c.acted ? '<span>' + esc(c.acted) + '</span>' : '');
@@ -832,7 +811,7 @@ function teacherCard(r) {
   const href = '#node/' + enc(r.node) + '/gen/' + enc(r.id) + '/' + (s ? s.n : 1);
   return '<div class="node gen" data-href="' + href + '"><span class="ring running"></span><div class="n-body">'
     + '<div class="n-head"><a href="' + href + '"><b>teacher</b></a><span class="tag accent">session '
-    + (s ? s.n + (s.area ? ' · ' + esc(s.area) : '') : 1) + '</span></div><div class="n-title">writing variants · '
+    + (s ? s.n : 1) + '</span></div><div class="n-title">writing variants · '
     + r.registered + ' made so far</div></div></div>';
 }
 
@@ -912,7 +891,7 @@ function relatedHtml(n) {
     + n.harness_runs.map((r) => runChip(r)).join(''));
   n.children.forEach((c) => parts.push('<span class="k">variant</span><a class="run" href="'
     + (c.runs.length ? '#node/' + enc(c.runs[0].name) : '#variant/' + enc(c.name)) + '" title="' + esc(c.title) + '">'
-    + esc(c.name) + (c.area ? ' · ' + esc(c.area) : '') + '</a>' + c.runs.map((r) => runChip(r)).join('')));
+    + esc(c.name) + '</a>' + c.runs.map((r) => runChip(r)).join('')));
   return parts.length ? '<div class="links">' + parts.join('') + '</div>' : '';
 }
 function cardHtml(card, diff, heading) {
@@ -936,17 +915,16 @@ function diffHtml(text) {
 function sessionLine(s) {
   if (s.status === 'registered') return 'made ' + s.registered.join(', ');
   if (s.status === 'rejected') return s.rejected.join(', ') + ' failed the checks';
-  if (s.status === 'declined') return 'found nothing worth running';
   return s.status === 'running' ? 'running' : 'made no variant';
 }
 function renderNode(force) {
   const n = DATA;
   nodeHeader();
   const scroll = window.scrollY;
-  const what = (n.variant === 'baseline' ? 'baseline' : 'variant ' + esc(n.variant) + (n.area ? ' · ' + esc(n.area)
-    : '')) + ' · run s' + n.seed + ' · ' + n.count + (n.probe ? ' probe' : '') + ' tasks · ' + esc(n.model) + ' · '
-    + esc(n.harness) + ' · ' + esc(n.benchmark) + ' · started ' + when(n.created);
-  let h = '<section class="panel"><div class="t1" style="font-size:17px;font-weight:620">' + esc(n.title) + ' '
+  const what = (n.variant === 'baseline' ? 'baseline' : 'variant ' + esc(n.variant)) + ' · run s' + n.seed + ' · '
+    + n.count + (n.probe ? ' probe' : '') + ' tasks · ' + esc(n.model) + ' · ' + esc(n.harness) + ' · '
+    + esc(n.benchmark) + ' · started ' + when(n.created);
+  let h = '<section class="panel"><div style="font-size:17px;font-weight:620">' + esc(n.title) + ' '
     + statusTag(n) + '</div><div class="sub">' + what + '</div>' + nodeTiles(n) + troubles(n) + relatedHtml(n)
     + '</section>';
   if (n.card) h += cardHtml(n.card, n.diff, 'Variant card');
@@ -955,8 +933,7 @@ function renderNode(force) {
       + r.sessions.length + ' sessions · ' + r.registered + ' variants made' + (r.live ? ' · still going' : '')
       + '</span></div>';
     r.sessions.forEach((s) => {
-      const title = 'Session ' + s.n + (s.area ? ' · ' + s.area : '');
-      h += rowShell('gen', r.id + '/' + s.n, s.status, title, sessionLine(s), '');
+      h += rowShell('gen', r.id + '/' + s.n, s.status, 'Session ' + s.n, sessionLine(s), '');
     });
   });
   const counts = Object.fromEntries(Object.entries(FILTERS).map(([f, [, keep]]) => [f, n.tasks.filter(keep).length]));
@@ -1304,7 +1281,6 @@ function trajHtml(d, key) {
     const o = d.outcome;
     h += '<div class="verdict"><span class="dot ' + o.status + '"></span>'
       + esc(o.status === 'running' ? 'still going' : sessionLine(o)) + '</div>';
-    if (o.none) h += blk('Why it found nothing (NONE.md)', o.none);
     Object.entries(o.checks || {}).forEach(([name, log]) => {
       h += blk('Why ' + esc(name) + ' failed the checks', log);
     });

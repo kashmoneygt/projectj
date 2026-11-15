@@ -40,17 +40,19 @@ def request(method: str, path: str, body: bytes) -> dict:
     return {**line, "params": kept}
 
 
-def usage(raw: bytes, log: Log) -> None:
-    """Log the usage a response body or stream event reports"""
+def usage(raw: bytes, log: Log) -> bool:
+    """Log the usage a response body or stream event reports, and say whether it had one"""
     if b'"usage"' not in raw:
-        return
+        return False
     try:
         data = json.loads(raw)
     except ValueError:
-        return
+        return False
     found = data.get("usage") if isinstance(data, dict) else None
     if isinstance(found, dict):
         log(entry={"usage": found})
+        return True
+    return False
 
 
 async def head(stream: asyncio.StreamReader) -> tuple[list[str], dict[str, str]] | None:
@@ -108,13 +110,22 @@ async def read_responses(stream: asyncio.StreamReader, methods: collections.dequ
             continue
         events = headers.get("content-type", "").lower().startswith("text/event-stream")
         rest = b""
-        async for piece in body(stream=stream, headers=headers):
-            rest += piece
-            if events:
-                *lines, rest = rest.split(b"\n")
-                for line in lines:
-                    usage(raw=line.removeprefix(b"data:"), log=log)
-        usage(raw=rest.removeprefix(b"data:"), log=log)
+        chunks, reported = 0, False
+        try:
+            async for piece in body(stream=stream, headers=headers):
+                rest += piece
+                if events:
+                    *lines, rest = rest.split(b"\n")
+                    for line in lines:
+                        reported |= usage(raw=line.removeprefix(b"data:"), log=log)
+                        if b'"delta"' in line:
+                            chunks += 1
+            reported |= usage(raw=rest.removeprefix(b"data:"), log=log)
+        finally:
+            # if a stream ends before the server reports usage (the harness cut the response or the task ran out
+            # of time), its tokens still count. The servers send about one token per chunk
+            if chunks and not reported:
+                log(entry={"usage": {"completion_tokens": chunks}, "from": "stream chunks"})
 
 
 class Tap:

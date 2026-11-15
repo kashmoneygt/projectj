@@ -1,4 +1,5 @@
 import fcntl
+import json
 import logging
 import os
 import shutil
@@ -154,32 +155,33 @@ def test_variants_generate_needs_a_scored_parent(
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     runs.write_node(node=_parent_node())
     with pytest.raises(typer.Exit):
-        cli.variants_generate(parent="t-node", teacher="opus", areas=None, timeout=1)
-    assert "no scored tasks" in caplog.text
+        cli.variants_generate(parent="t-node", teacher="opus", sessions=1, timeout=1)
+    assert "isn't scored yet" in caplog.text
 
 
 def _ready_to_generate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: generation.Round | Exception
-) -> list[list[str]]:
+) -> list[int]:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     parent = _parent_node()
     parent.total = 1
     runs.write_node(node=parent)
+    runs.hidden_path(root=parent).write_text("# hidden from the teacher\na__b-1\n")
     _fake_world(monkeypatch=monkeypatch)
     monkeypatch.setattr(
         cli.models, "teacher", lambda name: core.TeacherSpec(name=name, agent="copilot", model="m", effort="max")
     )
-    asked: list[list[str]] = []
+    asked: list[int] = []
 
     def generate(
         record: core.Node,
         h: harness.Harness,
         teacher_spec: core.TeacherSpec,
         endpoint: core.ModelEndpoint,
-        areas: list[str],
+        sessions: int,
         timeout_s: int,
     ) -> generation.Round:
-        asked.append(areas)
+        asked.append(sessions)
         if isinstance(found, Exception):
             raise found
         return found
@@ -188,65 +190,52 @@ def _ready_to_generate(
     return asked
 
 
-def test_variants_generate_runs_the_areas_asked_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_variants_generate_runs_the_sessions_asked_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     made = variants.tree_register(name="v", parent="baseline", parent_node="t-node", card=_card(title="V"), diff="+")
     asked = _ready_to_generate(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
-        found=generation.Round(out=tmp_path / "round", registered=[made], declined={}),
+        found=generation.Round(out=tmp_path / "round", registered=[made]),
     )
     command = ["variants", "generate", "--parent", "t-node"]
     assert _invoke(args=command).exit_code == 0
-    assert _invoke(args=[*command, "--area", "context", "--area", "tools"]).exit_code == 0
-    assert asked == [["open", "tools", "middleware", "context"], ["context", "tools"]]
-    unknown = _invoke(args=[*command, "--area", "tools", "--area", "everything"])
-    assert unknown.exit_code == 1 and "unknown areas everything" in unknown.output
-    assert len(asked) == 2
+    assert _invoke(args=[*command, "--sessions", "2"]).exit_code == 0
+    assert _invoke(args=[*command, "--sessions", "0"]).exit_code == 2
+    assert asked == [generation.SESSIONS, 2]
 
 
-@pytest.mark.parametrize("declined", [{}, {"tools": "Every tool idea here is tried."}])
-def test_variants_generate_fails_when_nothing_registers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, declined: dict[str, str]
-) -> None:
-    nothing = generation.Round(out=tmp_path / "round", registered=[], declined=declined)
-    _ready_to_generate(tmp_path=tmp_path, monkeypatch=monkeypatch, found=nothing)
-    with pytest.raises(typer.Exit) as stopped:
-        cli.variants_generate(parent="t-node", teacher="opus", areas=["tools", "open"], timeout=1)
-    assert stopped.value.exit_code == 1 and "no variant was registered" in caplog.text
-
-
-def test_a_round_where_every_session_found_nothing_worth_running_ends_cleanly(
+def test_variants_generate_needs_the_lineages_probe_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    reasons = {"tools": "Every tool idea here is tried.", "open": "Nothing else either."}
-    declined = generation.Round(out=tmp_path / "round", registered=[], declined=reasons)
-    _ready_to_generate(tmp_path=tmp_path, monkeypatch=monkeypatch, found=declined)
-    with caplog.at_level(logging.INFO):
-        cli.variants_generate(parent="t-node", teacher="opus", areas=["tools", "open"], timeout=1)
-    assert "nothing worth running in tools: Every tool idea here is tried." in caplog.text
-    assert "nothing worth running in open: Nothing else either." in caplog.text
-    assert "no variant was registered" not in caplog.text
+    asked = _ready_to_generate(tmp_path=tmp_path, monkeypatch=monkeypatch, found=RuntimeError("never called"))
+    runs.hidden_path(root=_parent_node()).unlink()
+    with pytest.raises(typer.Exit):
+        cli.variants_generate(parent="t-node", teacher="opus", sessions=1, timeout=1)
+    assert "the lineage has no probe set yet, so write it first with `rsi probe --root t-node`" in caplog.text
+    assert asked == []
 
 
 @pytest.mark.parametrize(
-    "down",
+    ("found", "said"),
     [
-        generation.TeacherUnavailable(
-            "session 1 failed before doing any work (429 rate limited), so the round stops; the areas left are "
-            "tools, open"
-        ),
+        (generation.Round(out=Path("round"), registered=[]), "no variant was registered"),
+        (generation.TeacherUnavailable("session 1 failed before doing any work"), "before doing any work"),
         # the model stopped answering, so the variant's question check says nothing about it
-        harness.CheckUnavailable("the javascript question couldn't run: pi got no response from the model"),
+        (harness.CheckUnavailable("the javascript question couldn't run: pi got no response"), "pi got no response"),
     ],
 )
-def test_a_teacher_or_model_that_is_down_stops_the_round_with_its_reason_logged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, down: Exception
+def test_a_round_that_makes_nothing_or_cant_go_on_stops_with_its_reason_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    found: generation.Round | Exception,
+    said: str,
 ) -> None:
-    _ready_to_generate(tmp_path=tmp_path, monkeypatch=monkeypatch, found=down)
+    _ready_to_generate(tmp_path=tmp_path, monkeypatch=monkeypatch, found=found)
     with pytest.raises(typer.Exit) as stopped:
-        cli.variants_generate(parent="t-node", teacher="opus", areas=["tools", "open"], timeout=1)
-    assert stopped.value.exit_code == 1 and str(down) in caplog.text
+        cli.variants_generate(parent="t-node", teacher="opus", sessions=2, timeout=1)
+    assert stopped.value.exit_code == 1 and said in caplog.text
 
 
 def test_make_node_records_what_made_its_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,7 +245,8 @@ def test_make_node_records_what_made_its_runs(tmp_path: Path, monkeypatch: pytes
     runs.write_node(node=parent)
     vdir = paths.variants_dir() / "tight-loop"
     vdir.mkdir(parents=True)
-    (vdir / "VARIANT.md").write_text("End every turn with progress\nWhat: w\n")
+    card = {"title": "End every turn with progress", "what": "w", "why": "y", "expect": "e"}
+    (vdir / cards.FILE).write_text(json.dumps(card))
     (vdir / "APPEND_SYSTEM.md").write_text("Work in a tight loop.\n")
     monkeypatch.setattr(
         cli.models, "get", lambda name: core.ModelSpec(name="gemma-4-12b", source="path:/tmp/x.gguf", model_id="m")
@@ -528,6 +518,7 @@ def test_scoring_grades_a_failed_evaluation_once_more(
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     node = _parent_node()
     node.runs = {iid: core.TaskRun(instance_id=iid, status="ok", patch="+x") for iid in ("a__b-1", "c__d-2", "e__f-3")}
+    node.runs["c__d-2"] = core.TaskRun(instance_id="c__d-2", status="error", error="docker went away")
     runs.write_node(node=node)
     runs.write_preds(path=paths.node_dir(name="t-node") / "preds.json", runs=node.runs, model_name="gemma-4-12b")
     grader = _FlakyGrader(fails=fails)
@@ -536,6 +527,8 @@ def test_scoring_grades_a_failed_evaluation_once_more(
     scored = runs.read_node(name="t-node")
     scratch = paths.node_dir(name="t-node") / "scoring"
     assert grader.places == [scratch, scratch]
+    # an errored task counts as unresolved until the run is finished again
+    assert "count as unresolved until you finish the run with the same `rsi run` command: c__d-2" in caplog.text
     if fails == 1:
         assert (scored.resolved, scored.total) == (2, 3) and not scratch.exists()
     else:
@@ -664,6 +657,8 @@ def test_running_a_run_again_finishes_it_in_place(
         "c__d-2": "ok",
         "e__f-3": "timeout" if scored else "ok",
     }
+    # the old score doesn't cover the task that ran again, so the node waits for scoring
+    assert (finished.total, finished.resolved) == (0, 0)
 
 
 def test_a_scored_run_runs_again_only_under_another_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -712,7 +707,7 @@ def test_run_probe_requires_scored_parent(tmp_path: Path, monkeypatch: pytest.Mo
     ]
     result = _invoke(args=args)
     assert result.exit_code == 1
-    assert "no scored tasks" in result.output
+    assert "isn't scored yet" in result.output
 
 
 def _scored_root() -> core.Node:
@@ -948,9 +943,9 @@ def _probe_node(root: core.Node, probe: list[str], node: str, variant: str, seed
             "seed": seed,
             "server": SERVER,
             "contract": CONTRACT,
-            "variant_digest": cli._variant_digest(
-                package=variants.resolve_variant(reference=variant) if variant else None
-            ),
+            "variant_digest": variants.package_digest(package=variants.resolve_variant(reference=variant))
+            if variant
+            else "",
         }
     )
     run.runs = {iid: core.TaskRun(instance_id=iid, status="ok") for iid in probe}

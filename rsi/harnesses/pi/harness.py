@@ -46,7 +46,7 @@ CHECK_COMMAND = (
 )
 TRY_COMMAND = '#!/bin/sh\nexec python3 /opt/rsi/try_variant.py "$@"\n'
 
-PI_VERSION = "1.4.0"
+PI_VERSION = "1.5.2"
 PI_PKG = "@earendil-works/pi-coding-agent"
 PI_REPO = "https://github.com/earendil-works/pi.git"
 PI_BASE_IMAGE = f"rsi/pi-base:{PI_VERSION}"
@@ -382,6 +382,8 @@ def _task_script(ctx: harness.RunContext) -> str:
     return (
         "set -u\n"
         f"cd {ctx.instance.workdir}\n"
+        # before HEAD is saved, so the patch has only the agent's changes
+        f"{ctx.instance.setup}"
         f"git rev-parse HEAD > {ORIG_HEAD_FILE}\n"
         f"cat /out/{harness.TASK_FILE} | {' '.join(pi_args)} > /out/events.jsonl 2> /out/pi.err\n"
         f"{capture_patch(workdir=ctx.instance.workdir)}"
@@ -731,8 +733,13 @@ class PiHarness:
             for path in variants.package_files(root=package).values()
         )
 
-    def transcript(self, *, instance_dir: Path, full: bool) -> str:
-        return events.transcript(events=instance_dir / "events.jsonl", full=full)
+    def run_files(self, *, instance_dir: Path) -> dict[str, Path]:
+        # pi's own record of the session (from --session-dir), and what metrics.ts saw of each request
+        sessions = sorted((instance_dir / "session").glob("*.jsonl"))
+        files = {f"session-{k}.jsonl" if k > 1 else "session.jsonl": path for k, path in enumerate(sessions, start=1)}
+        if (instance_dir / "metrics.jsonl").is_file():
+            files["metrics.jsonl"] = instance_dir / "metrics.jsonl"
+        return files
 
     def system_context(self, *, instance_dir: Path) -> str:
         return events.system_context(metrics=instance_dir / "metrics.jsonl")

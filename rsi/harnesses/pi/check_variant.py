@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-CARD = "VARIANT.md"  # never reaches the agent
+CARD = "variant.json"  # the card, which never reaches the agent
 
 # what the agent gets (SYSTEM.md replaces pi's system prompt, APPEND_SYSTEM.md adds to it)
 RUNTIME_FILES = ("package.json", "SYSTEM.md", "APPEND_SYSTEM.md", "settings.json", "mcp.json")
@@ -21,11 +21,11 @@ _CODE_SUFFIXES = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".py", ".sh")
 # code that would change the model, its requests or our measurements
 _FORBIDDEN_CODE = (
     (re.compile(r"before_provider_(?:request|headers)"), "rewrites the model request"),
-    (re.compile(r"\bregister(?:Provider|VirtualModel)\b"), "adds a model provider or model route"),
+    (re.compile(r"\b(?:un)?register(?:Provider|VirtualModel)\b"), "changes the model providers or model routes"),
     (re.compile(r"\bset(?:Model|ThinkingLevel)\b"), "changes the model or its thinking level"),
     (re.compile(r"\bRSI_[A-Z_]+"), "touches the evaluation instrumentation"),
 )
-# settings.json keys a variant can set, from pi 1.4.0's settings-schema.ts
+# settings.json keys a variant can set, from pi 1.5.2's settings-schema.ts
 _SETTINGS = frozenset(
     (
         # how the agent works
@@ -45,6 +45,7 @@ _SETTINGS = frozenset(
         # display only
         "$schema",
         "lastChangelogVersion",
+        "extensionChangelogVersions",
         "theme",
         "hideThinkingBlock",
         "showCacheMissNotices",
@@ -66,7 +67,7 @@ _SETTINGS = frozenset(
         "fullscreenWheelScrollLines",
     )
 )
-# the rest of pi 1.4.0's settings, and why a variant can't set them
+# the rest of pi 1.5.2's settings, and why a variant can't set them
 _FIXED_SETTINGS = {
     **dict.fromkeys(
         ("defaultProvider", "defaultModel", "defaultThinkingLevel", "modelThinkingLevels", "enabledModels"),
@@ -80,19 +81,13 @@ _FIXED_SETTINGS = {
         ("extensions", "packages", "npmCommand", "skills", "prompts", "themes", "defaultProjectTrust"),
         "loads code or files from outside the package",
     ),
-    **dict.fromkeys(("shellPath", "externalEditor"), "runs a program from outside the package"),
+    **dict.fromkeys(("shellPath", "externalEditor", "selfUpdateCommand"), "runs a program from outside the package"),
     "sessionDir": "moves the session files the runner keeps",
     **dict.fromkeys(
         ("sessionShareDestination", "enableInstallTelemetry", "enableAnalytics", "trackingId", "deviceId"),
         "sends data off the machine",
     ),
 }
-_LOAD_ERRORS = (
-    "Failed to load extension",
-    "Extension path does not exist",
-    "Unknown built-in extension",
-    "extension name conflict",
-)
 _DEAD_MODELS = {
     "providers": {
         "local": {
@@ -264,7 +259,7 @@ def static_problems(package: Path, terms: tuple[str, ...] = (), manifest: Path |
     problems: list[str] = term_problems(package=package, terms=terms)
     if manifest is not None and (package / "package.json").read_bytes() != manifest.read_bytes():
         problems.append(
-            "package.json differs from the baseline's; leave it unchanged and say what changed in VARIANT.md"
+            "package.json differs from the baseline's; leave it unchanged and say what changed in variant.json"
         )
     pi_section = _pi_manifest(folder=package) or {}
     root = package.resolve()
@@ -308,7 +303,7 @@ def static_problems(package: Path, terms: tuple[str, ...] = (), manifest: Path |
                 if key in _FIXED_SETTINGS:
                     problems.append(f"settings.json sets {key}, which {_FIXED_SETTINGS[key]}")
                 elif key not in _SETTINGS:
-                    problems.append(f"settings.json sets {key}, which pi 1.4.0 doesn't have")
+                    problems.append(f"settings.json sets {key}, which pi doesn't have")
     return problems
 
 
@@ -347,8 +342,8 @@ def load_problems(package: Path, workdir: Path, timeout_s: float = 90.0) -> list
         out, err = _text(raw=exc.stdout), _text(raw=exc.stderr)
     except FileNotFoundError:
         return ["pi is not installed here"]
-    problems = [marker for marker in _LOAD_ERRORS if marker in err]
-    problems += [line.strip()[:200] for line in err.splitlines() if line.startswith("Error:")]
+    # pi prints every extension that fails to load as an "Error: Failed to load extension ..." line, then exits
+    problems = [line.strip()[:200] for line in err.splitlines() if line.startswith("Error:")]
     if not out.strip():
         problems.append("pi produced no events (it did not start)")
     return problems

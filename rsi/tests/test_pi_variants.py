@@ -6,7 +6,6 @@ import sys
 import tokenize
 from pathlib import Path
 
-import pytest
 import requests
 
 from rsi import core, folders, paths
@@ -19,7 +18,7 @@ def _package(tmp_path: Path) -> Path:
     (package / "extensions").mkdir(parents=True)
     (package / "package.json").write_text((pi.HARNESS.package_dir / "package.json").read_text())
     (package / "extensions" / "notes.ts").write_text("export default function notes(pi) {}\n")
-    (package / "VARIANT.md").write_text("card\nWhat: w\n")
+    (package / "variant.json").write_text("{}")
     return package
 
 
@@ -60,7 +59,7 @@ def test_check_reports_a_changed_manifest(tmp_path: Path) -> None:
     manifest = json.loads(baseline.read_text())
     (package / "package.json").write_text(json.dumps({**manifest, "name": "@projectj/pi-my-variant"}, indent=2) + "\n")
     assert pi.check.static_problems(package=package, manifest=baseline) == [
-        "package.json differs from the baseline's; leave it unchanged and say what changed in VARIANT.md"
+        "package.json differs from the baseline's; leave it unchanged and say what changed in variant.json"
     ]
 
 
@@ -69,7 +68,7 @@ def test_check_reports_files_that_never_reach_the_agent(tmp_path: Path) -> None:
     (package / "prompts").mkdir()
     (package / "prompts" / "system.md").write_text("never staged\n")
     (package / "NOTES.md").write_text("scratch\n")
-    # pi 1.4.0 only warns about a tools/ folder
+    # pi only warns about a tools/ folder
     (package / "tools").mkdir()
     (package / "tools" / "search.ts").write_text("export default {}\n")
     problems = pi.check.static_problems(package=package)
@@ -137,6 +136,7 @@ def test_check_rejects_changes_to_the_model_contract(tmp_path: Path) -> None:
         "export default function cap(pi) {\n"
         "  pi.on('before_provider_request', (e) => ({ ...e.payload, max_tokens: 32768 }));\n"
         "  pi.setThinkingLevel('off');\n"
+        "  pi.unregisterProvider('local');\n"
         "  process.env.RSI_MAX_TURNS = '1000';\n"
         "}\n"
     )
@@ -148,6 +148,7 @@ def test_check_rejects_changes_to_the_model_contract(tmp_path: Path) -> None:
     problems = pi.check.static_problems(package=package)
     assert any("rewrites the model request" in p for p in problems)
     assert any("changes the model or its thinking level" in p for p in problems)
+    assert any("changes the model providers or model routes (unregisterProvider)" in p for p in problems)
     assert any("touches the evaluation instrumentation" in p for p in problems)
     assert any("settings.json sets defaultThinkingLevel" in p for p in problems)
     assert "settings.json sets thinkingBudgets, which caps how much the model thinks, which is set with the model" in (
@@ -186,116 +187,13 @@ def test_check_takes_only_settings_about_how_the_agent_works(tmp_path: Path) -> 
         "settings.json sets shellPath, which runs a program from outside the package",
         "settings.json sets sessionDir, which moves the session files the runner keeps",
         "settings.json sets enableAnalytics, which sends data off the machine",
-        "settings.json sets maxTurns, which pi 1.4.0 doesn't have",
+        "settings.json sets maxTurns, which pi doesn't have",
     ]
     assert not pi.check._SETTINGS & pi.check._FIXED_SETTINGS.keys()
 
 
 def _write_events(path: Path, records: list[dict]) -> None:
     path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records))
-
-
-def test_transcript_renders_the_task_then_each_turn(tmp_path: Path) -> None:
-    events = tmp_path / "events.jsonl"
-    task = "The parser drops trailing commas. " * 40
-    _write_events(
-        path=events,
-        records=[
-            {"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": task}]}},
-            {"type": "message_update", "assistantMessageEvent": {"type": "thinking_delta", "delta": "x"}},
-            {
-                "type": "message_end",
-                "message": {
-                    "role": "assistant",
-                    "stopReason": "toolUse",
-                    "usage": {"output": 1200, "reasoning": 900},
-                    "content": [
-                        {"type": "thinking", "thinking": "I should look at the parser first."},
-                        {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "pytest -q\necho"}},
-                        {
-                            "type": "toolCall",
-                            "id": "c2",
-                            "name": "edit",
-                            "arguments": {"path": "a.py", "edits": [1, 2]},
-                        },
-                    ],
-                },
-            },
-            {
-                "type": "tool_execution_end",
-                "toolCallId": "c1",
-                "toolName": "bash",
-                "isError": True,
-                "result": {"content": [{"type": "text", "text": "collected 3\nE   AssertionError\n1 failed"}]},
-            },
-            {
-                "type": "tool_execution_end",
-                "toolCallId": "c2",
-                "toolName": "edit",
-                "result": {"content": [{"type": "text", "text": "ok"}]},
-            },
-            {"type": "compaction_end", "reason": "threshold"},
-            {
-                "type": "message_end",
-                "message": {"role": "user", "content": [{"type": "text", "text": "Budget notice"}]},
-            },
-            {
-                "type": "message_end",
-                "message": {"role": "custom", "customType": "settle-guard", "content": "Take one concrete step."},
-            },
-            {
-                "type": "message_end",
-                "message": {
-                    "role": "assistant",
-                    "stopReason": "length",
-                    "usage": {"output": 16384, "reasoning": 16384},
-                    "content": [
-                        {"type": "thinking", "thinking": "Let me recall the upstream fix... no, that's not it."}
-                    ],
-                },
-            },
-        ],
-    )
-    text = pi.events.transcript(events=events)
-    glimpse = text.split("\n\n", 1)[0]
-    assert glimpse.startswith("task: The parser drops trailing commas. The parser")
-    assert len(glimpse) == len("task: ") + pi.events.TASK_GLIMPSE_CHARS and glimpse.endswith("…")
-    assert pi.events.transcript(events=events, full=True).startswith(f"## task message\n{task.strip()}\n")
-    assert "[1] 1.2k tok out" in text
-    assert "thinking (900 tok): I should look at the parser first." in text
-    assert "bash: pytest -q (+1 lines) → error: collected 3 E AssertionError 1 failed" in text
-    assert "edit a.py (2 edits) → ok" in text
-    assert "[context compacted (threshold)]" in text
-    assert "[user message: Budget notice]" in text
-    assert "[settle-guard message: Take one concrete step.]" in text
-    assert "[2] 16.4k tok out, stop length (cut at the output cap)" in text
-    assert pi.events.transcript(events=tmp_path / "missing.jsonl") == "(no model output)\n"
-
-
-def test_transcript_elides_the_middle_of_long_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    records = []
-    for i in range(60):
-        records.append(
-            {
-                "type": "message_end",
-                "message": {
-                    "role": "assistant",
-                    "stopReason": "toolUse",
-                    "usage": {"output": 10},
-                    "content": [
-                        {"type": "toolCall", "id": f"c{i}", "name": "bash", "arguments": {"command": f"ls {i}"}}
-                    ],
-                },
-            }
-        )
-        records.append({"type": "tool_execution_end", "toolCallId": f"c{i}", "isError": i % 2 == 0, "result": {}})
-    events = tmp_path / "events.jsonl"
-    _write_events(path=events, records=records)
-    monkeypatch.setattr(pi.events, "TRANSCRIPT_MAX_CHARS", 1500)
-    text = pi.events.transcript(events=events)
-    assert len(text) < 1700
-    assert "[1] 10 tok out" in text and "[60] 10 tok out" in text
-    assert "entries omitted (tool calls: bash" in text and "[10] 10 tok out" not in text
 
 
 def test_contract_violations(tmp_path: Path) -> None:
@@ -437,8 +335,20 @@ def test_task_metrics_measure_the_whole_prompt(tmp_path: Path) -> None:
     m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="+a\n\n")
     assert m.context_pct == 49.6
     assert m.patch_lines == 1
-    assert pi.HARNESS.transcript(instance_dir=tmp_path, full=False).startswith("[1] 0 tok out")
-    assert pi.HARNESS.transcript(instance_dir=tmp_path, full=True).startswith("\n## turn 1 · 0 tok out")
+
+
+def test_the_teacher_gets_pis_session_record_and_the_metrics_but_nothing_that_says_if_a_run_passed(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "session").mkdir()
+    for name in ("2026-11-06T21-19-02Z_a.jsonl", "2026-11-06T21-30-00Z_b.jsonl", "events.jsonl", "metrics.jsonl"):
+        (tmp_path / ("session" if name.startswith("2026") else "") / name).write_text("{}\n")
+    (tmp_path / "result.json").write_text('{"resolved": true}')
+    assert pi.HARNESS.run_files(instance_dir=tmp_path) == {
+        "session.jsonl": tmp_path / "session" / "2026-11-06T21-19-02Z_a.jsonl",
+        "session-2.jsonl": tmp_path / "session" / "2026-11-06T21-30-00Z_b.jsonl",
+        "metrics.jsonl": tmp_path / "metrics.jsonl",
+    }
 
 
 def test_task_metrics_count_the_largest_and_capped_responses(tmp_path: Path) -> None:
@@ -462,10 +372,11 @@ def test_task_metrics_count_the_largest_and_capped_responses(tmp_path: Path) -> 
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
     m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
-    assert (m.peak_output_tokens, m.capped_requests) == (16384, 2)
+    # with no metrics.jsonl, the stop reason comes from the agent's own events
+    assert (m.peak_output_tokens, m.capped_requests, m.stop_reason) == (16384, 2, "stop")
 
 
-def test_a_call_still_running_when_the_run_ended_shows_as_such(tmp_path: Path) -> None:
+def test_a_call_still_running_when_the_run_ended_counts_until_then(tmp_path: Path) -> None:
     call = {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "grep -r x /"}}
     _write_events(
         path=tmp_path / "events.jsonl",
@@ -481,53 +392,9 @@ def test_a_call_still_running_when_the_run_ended_shows_as_such(tmp_path: Path) -
             {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "bash"},
         ],
     )
-    assert "bash: grep -r x / → still running when the run ended" in pi.events.transcript(
-        events=tmp_path / "events.jsonl"
-    )
-    assert "→ still running when the run ended\n" in pi.events.transcript(events=tmp_path / "events.jsonl", full=True)
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
     m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=600.0, patch="")
     assert (m.tool_ms, m.tool_stats["bash"].count) == (596_000, 1)
-
-
-def test_full_transcript_keeps_every_turn_in_full(tmp_path: Path) -> None:
-    thinking = "Line one of a long plan.\n" * 400
-    records = [
-        {"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "Fix the parser."}]}},
-        {
-            "type": "message_end",
-            "message": {
-                "role": "assistant",
-                "stopReason": "toolUse",
-                "usage": {"output": 5000, "reasoning": 4800},
-                "content": [
-                    {"type": "thinking", "thinking": thinking},
-                    {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "pytest -q tests/"}},
-                ],
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "toolCallId": "c1",
-            "isError": True,
-            "result": {"content": [{"type": "text", "text": "x" * 5000 + "\nE   AssertionError: 1 != 2"}]},
-        },
-    ]
-    for i in range(40):
-        records.append(
-            {"type": "message_end", "message": {"role": "assistant", "stopReason": "toolUse", "usage": {"output": 10}}}
-        )
-    _write_events(path=tmp_path / "events.jsonl", records=records)
-    text = pi.events.transcript(events=tmp_path / "events.jsonl", full=True)
-    assert text.startswith("## task message\nFix the parser.\n\n## turn 1 · 5.0k tok out (thinking 4.8k)")
-    assert pi.events.transcript(events=tmp_path / "events.jsonl").startswith(
-        "task: Fix the parser.\n\n[1] 5.0k tok out"
-    )
-    assert thinking.strip() in text
-    assert "### bash\n$ pytest -q tests/\n→ error\n" in text
-    assert "characters omitted" in text and text.count("x") < 2_100
-    assert "E   AssertionError: 1 != 2" in text
-    assert "## turn 41 " in text and "omitted (tool calls" not in text
 
 
 def test_wait_timeouts_are_recognized_in_both_shapes() -> None:
@@ -558,14 +425,14 @@ def test_check_rejects_workload_terms_in_agent_visible_files(tmp_path: Path) -> 
         "APPEND_SYSTEM.md names the workload or its protocol ('benchmark')",
         "extensions/done.ts names the workload or its protocol ('hidden tests')",
     ]
-    (package / "VARIANT.md").write_text("cut empty patches\nWhy: tuned on swebench benchmark failures\n")
+    (package / "variant.json").write_text('{"why": "tuned on swebench benchmark failures"}')
     assert pi.check.term_problems(package=package, terms=terms) == problems
 
 
 def test_check_leaves_the_card_to_the_loop(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
     assert pi.check.static_problems(package=package) == []
-    (package / "VARIANT.md").unlink()
+    (package / "variant.json").unlink()
     assert pi.check.static_problems(package=package) == []
 
 

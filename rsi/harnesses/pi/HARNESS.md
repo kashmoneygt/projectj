@@ -1,18 +1,26 @@
 # How a variant runs in pi
 
-Your variant is a pi package: a folder of files that pi 1.4.0 loads on top of its defaults. `parent/` is the
+Your variant is a pi package: a folder of files that pi 1.5.2 loads on top of its defaults. `parent/` is the
 package the parent ran. The baseline package adds nothing, so the baseline is pi as it ships: its own system
 prompt, its four tools (`read`, `bash`, `edit`, `write`) and its own defaults for everything else, like
 compaction and retries.
 
-## How a task runs
+## How the agent runs
 
-Each task runs `pi --print -e /opt/harness --mode json` in a container that starts in the task's repo, with your
-package at `/opt/harness`. The agent gets one message, the task as a person would ask for it, and pi adds nothing to
-it. Each transcript in `/work` starts with that message. Nobody answers the agent's questions. The run ends when the
-agent stops calling tools, and there's no turn limit. Each task has a time limit the agent isn't told about, and a
-run still going then is stopped. Whatever the agent left in the repo, new files included, is what gets judged.
-`overview.md` gives that limit, the context window and the most tokens one response may have.
+Every run is `pi --print -e /opt/harness --mode json` in a container that starts in the repo, with your package at
+`/opt/harness`. The agent gets one message, the task as a person would ask for it, and pi adds nothing to it. Nobody
+answers the agent's questions. The run ends when the agent stops calling tools, and there's no turn limit. A run that
+goes on too long is stopped. What the agent leaves in the repo, new files included, is the run's diff.
+
+## What a run leaves
+
+Each task's folder under `/work/runs/` holds two files from its run:
+
+- `session.jsonl` - pi's own record of the session, one JSON object per line: the system prompt pi built, the task
+  message, each response with its thinking and tool calls, each tool result, and each record a package made with
+  `appendEntry`. pi's `packages/coding-agent/docs/session-format.md` describes it
+- `metrics.jsonl` - what the metrics extension saw: the system prompt and tools as they were sent (`"type": "context"`),
+  the size of each request, and each response's timing (`"type": "timing"`)
 
 ## What a package can hold
 
@@ -31,9 +39,9 @@ run still going then is stopped. Whatever the agent left in the repo, new files 
 - `agents/*.md` - copied to `agents/` in pi's agent dir. pi doesn't read them itself, but an extension can,
   like pi's example subagent extension
 - `package.json` - the manifest. Every `extensions/*.ts` and `skills/*/` loads through its globs. Leave it as it is,
-  since your card in `VARIANT.md` says what changed
+  since your card in `variant.json` says what changed
 
-Nothing else reaches the agent. `VARIANT.md` is your card for the people who run the variants, and the agent never
+Nothing else reaches the agent. `variant.json` is your card for the people who run the variants, and the agent never
 sees it.
 
 ## Where a change can go
@@ -56,6 +64,10 @@ sees it.
 `packages/coding-agent/examples/extensions/` has working examples of most of these, like `tool-override.ts`,
 `truncated-tool.ts`, `permission-gate.ts`, `custom-compaction.ts` and `subagent/`.
 
+A tool you register under a built-in's name doesn't get the settings people gave pi for it. So build yours on pi's
+own and pass them on, like `createBashToolDefinition(cwd, { shellPath, commandPrefix })` with `getShellPath()` and
+`getShellCommandPrefix()` from `SettingsManager.create(cwd)`.
+
 Every change has a cost. Text the model gets on every request is paid for on every request. Changing earlier
 messages makes the model server work through them again, since it reuses the unchanged start of the last request.
 There's one model server, so a second `pi` process waits its turn and adds time. A call to the model from an
@@ -63,21 +75,20 @@ extension or a second process goes through the same server with the same setting
 like the agent's own.
 
 Whenever your change kicks in (it blocks or rewrites a tool call, adds a message, asks for one more turn), record it
-with `pi.appendEntry("acted", { what: "<a few words>" })`. The model never sees it. Each run counts these, and
-`tree.md` shows on how many runs each variant kicked in, so a variant that never did isn't mistaken for an idea that
-failed.
+with `pi.appendEntry("acted", { what: "<what your change did, in a few words>" })`. The model never sees it. Text
+that's in every request, like a prompt section, needs no record. Each record shows up in the run's `session.jsonl`,
+and `tree.json` says how often each variant kicked in, so one that never did isn't mistaken for an idea that failed.
 
 ## pi's docs and source
 
-`/opt/pi-src` is pi's repo at 1.4.0. Read it instead of guessing, and once you know what you want to build,
+`/opt/pi-src` is pi's repo at 1.5.2. Read it instead of guessing, and once you know what you want to build,
 read only what building it needs:
 
 - `packages/coding-agent/docs/` - pi's docs, listed in `index.md`. `extensions.md` covers the run lifecycle,
-  and its "Follow the extension contracts" says what each event's handler may change
+  and its "Handler Composition" says what each event's handler may change
 - `packages/coding-agent/examples/extensions/` - working extensions to copy from
 - `packages/coding-agent/src/core/extensions/types.ts` - the exact type of every event and result
-- `packages/ai/src/types.ts` - the messages an extension sees. The transcripts flatten their parts into text, so
-  take field names from here
+- `packages/ai/src/types.ts` - the messages an extension sees, with the same fields as in `session.jsonl`
 - `packages/agent/src/agent-loop.ts` - the agent loop itself
 
 ## What's fixed
@@ -110,13 +121,15 @@ The same checks run when you hand a variant in, and a variant that fails them is
 
 ## Trying a package
 
-`try-variant <dir> <repo> <task file>` runs a package the way a task run does, against the agent's own model: pi
-starts in a copy of the repo with the package staged, and the agent gets the task file's text as its one message, so
-write it the way a person would ask for the work. It prints each model response's tool calls, every message the
-package added, how the run ended and what the run changed, and keeps the run's record under `/out/tries`. The tasks'
-repos aren't in your container, so build a small repo in `/tmp` that recreates the moment your change is for (pytest
-is installed). A run takes minutes, like a real task, and is stopped after 540 seconds unless you pass `--timeout`.
-Run a few to see that your change fires when it should and stays quiet when it shouldn't.
+`try-variant <dir> <repo> <task file>` runs a package the way a task run does, against the agent's own model: pi starts
+in a copy of the repo with the package staged, and the agent gets the task file's text as its one message, so write it
+the way a person would ask for the work. It prints each model response's tool calls, every message the package added
+and every `acted` record, how the run ended and what the run changed, and keeps the run's record under `/out/tries`.
+Build a small repo yourself in `/tmp` that sets up the problem your change is for, or the kind of work you want to watch
+(pytest and node are installed). A run takes minutes, like a real task, and is stopped after 540 seconds unless you pass
+`--timeout`. Run a few to see that your change fires when it should and stays quiet when it shouldn't. A background job
+dies when its tool call ends. To run tries side by side, start them in one call and `wait`, or use `setsid`. Stop any
+server a try leaves running.
 
 `try-variant --question <dir>` asks the agent a question about a small JavaScript repo, one that needs no change.
 When you hand a variant in, it's asked this question and one like it about a Python repo. It's rejected if, on two

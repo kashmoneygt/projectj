@@ -115,6 +115,18 @@ def test_forwarder_finds_the_usage_servers_report() -> None:
     assert entries == [{"usage": tail["usage"]}, {"usage": usage}]
 
 
+def test_forwarder_counts_a_cut_streams_chunks_as_its_tokens() -> None:
+    stream = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" + b"".join(
+        _chunk(data=b'data: {"choices":[{"delta":{"reasoning_content":"' + word + b'"}}],"usage":null}\n\n')
+        for word in (b"1,", b" 2,", b" 3,")
+    )
+    # the harness hung up in the middle of the next chunk, so the server never reported usage
+    cut = stream + b"40\r\ndata: {"
+    assert _read(direction="read_responses", data=cut, methods=("POST",)) == [
+        {"usage": {"completion_tokens": 3}, "from": "stream chunks"}
+    ]
+
+
 def test_forwarder_passes_every_byte_on_and_logs_who_sent_it(tmp_path: Path) -> None:
     log_file = tmp_path / "requests-11501.jsonl"
     request = _post(path="/v1/chat/completions", body=json.dumps({"model": "q", "messages": []}).encode())

@@ -13,7 +13,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rsi import benchmarks, cards, core, generation, harness, paths, runs, stats, teacher, tree, variants, views
+from rsi import benchmarks, core, generation, harness, paths, runs, stats, teacher, tree, variants, views
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def tree_data() -> dict:
         members.setdefault(tree.lineage(name=n.name, nodes=nodes)[0].name, []).append(n)
     roots = sorted((by_name[name] for name in members), key=lambda n: -n.created)
     lineages = [_lineage(root=r, members=members[r.name], entries=entries, nodes=nodes, now=now) for r in roots]
-    return {"now": now, "areas": generation.area_texts(), "lineages": lineages}
+    return {"now": now, "lineages": lineages}
 
 
 def _lineage(
@@ -98,7 +98,6 @@ def _harness(
     return {
         "name": name,
         "title": _title(entry=entry, node=own[0] if own else None, name=name),
-        "area": entry.area if entry is not None else "",
         "round": entry.round if entry is not None else "",
         "reuses": list(entry.reuses) if entry is not None else [],
         "changed": entry.diff if entry is not None else "",  # the files it changed, in one line
@@ -170,9 +169,7 @@ def _run_chip(node: core.Node, probe: tuple[str, ...], now: float) -> dict:
 
 def _title(entry: variants.VariantEntry | None, node: core.Node | None, name: str) -> str:
     if entry is not None:
-        # the card has the whole title, while tree.json keeps it cut short
-        card = cards.read(package=paths.variants_dir() / entry.name, title_max=None)
-        return card.title if card is not None else entry.title
+        return entry.title
     if node is not None and not node.variant:
         return f"{node.harness} {node.harness_version}, no changes"
     return (node.title if node is not None else None) or name
@@ -239,7 +236,6 @@ def node_data(name: str) -> dict:
         **_run_chip(node=node, probe=probe, now=now),
         "variant": variant,
         "title": _title(entry=entry, node=node, name=variant),
-        "area": entry.area if entry is not None else "",
         "parent": node.parent,
         "parent_label": variants.run_label(node=parent) if parent is not None else "",
         "model": node.model.name,
@@ -271,7 +267,6 @@ def node_data(name: str) -> dict:
             {
                 "name": e.name,
                 "title": e.title,
-                "area": e.area,
                 "runs": [_run_chip(node=n, probe=probe, now=now) for n in variants.variant_nodes(entry=e, nodes=nodes)],
             }
             for e in sorted(entries.values(), key=lambda e: e.created)
@@ -349,11 +344,6 @@ def _mtime(path: Path) -> float | None:
         return None
 
 
-def _age(path: Path, now: float) -> float:
-    mtime = _mtime(path=path)
-    return float("inf") if mtime is None else now - mtime
-
-
 def _quiet_for(folder: Path, now: float) -> float:
     """Seconds since anything directly in folder changed"""
     times = [_mtime(path=p) for p in folder.iterdir()] if folder.is_dir() else []
@@ -377,7 +367,8 @@ def _status(node: core.Node, live: set[str], now: float) -> str:
         return "running"
     if node.total:
         return "done"
-    busy = _age(path=paths.node_dir(name=node.name) / "rsi.log", now=now) < LIVE_S
+    mtime = _mtime(path=paths.node_dir(name=node.name) / "rsi.log")
+    busy = mtime is not None and now - mtime < LIVE_S
     if len(node.runs) >= (len(node.task_ids) or node.tasks):
         return "scoring" if busy else "unscored"
     return "running" if busy else "stopped"
@@ -567,44 +558,36 @@ def _rounds(node: core.Node, entries: dict[str, variants.VariantEntry], now: flo
 
 
 def _session_summary(round_dir: Path, session_dir: Path, entries: dict[str, variants.VariantEntry], now: float) -> dict:
-    _, n, area = session_dir.name.split("-", 2)
-    rejected = sorted(p.parent.name for p in (round_dir / "checks" / session_dir.name).glob("*/PROBLEMS.md"))
-    # a round has one session per area, so round + area tells us which session made a variant
+    n = int(session_dir.name.split("-")[1])
+    rejected = sorted(p.parent.name for p in (round_dir / "checks" / session_dir.name).glob(f"*/{generation.PROBLEMS}"))
     node = round_dir.parent.parent.name
-    registered = [e.name for e in entries.values() if (e.parent_node, e.round, e.area) == (node, round_dir.name, area)]
+    made_here = (node, round_dir.name, n)
+    registered = [e.name for e in entries.values() if (e.parent_node, e.round, e.session) == made_here]
     if registered:
         status = "registered"
     elif rejected:
         status = "rejected"
-    elif _none(session_dir=session_dir) is not None:
-        status = "declined"
     elif _quiet_for(folder=session_dir, now=now) < LIVE_S:
         status = "running"
     else:
         status = "no variant"
-    return {"n": int(n), "area": area, "status": status, "registered": registered, "rejected": rejected}
+    return {"n": n, "status": status, "registered": registered, "rejected": rejected}
 
 
 def _rejection(folder: Path) -> str:
     """Why a candidate was turned down, then the end of each check's log"""
-    problems = folder / "PROBLEMS.md"
-    parts = [problems.read_text(errors="replace")] if problems.is_file() else []
+    problems = folder / generation.PROBLEMS
+    parts = ["".join(f"- {p}\n" for p in json.loads(problems.read_text()))] if problems.is_file() else []
     for log_file in sorted(folder.rglob("*.log")):
         parts.append(f"{log_file.relative_to(folder)}:\n{log_file.read_text(errors='replace')[-3_000:]}")
     return "\n\n".join(parts)
 
 
-def _none(session_dir: Path) -> str | None:
-    """What the session said when it made nothing, or None if it didn't write NONE.md"""
-    out = session_dir / generation.TEACHER_OUT
-    return generation.teacher_text(path=out / "variants" / generation.NONE, out=out)
-
-
 def session_data(node_name: str, round_id: str, session: int) -> dict:
     """A teacher session's trajectory, prompt and check results"""
     round_dir = paths.node_dir(name=_safe(name=node_name)) / "generations" / _safe(name=round_id)
-    folder = next(round_dir.glob(f"session-{session}-*"), None)
-    if folder is None or not folder.is_dir():
+    folder = round_dir / f"session-{session}"
+    if not folder.is_dir():
         raise KeyError(f"no session {session} in round {round_id!r}")
     agent = json.loads((round_dir / generation.ROUND).read_text())["teacher"]["agent"]
     data = dataclasses.asdict(_view(axis="teacher", name=agent, folder=str(folder), stamp=_stamp(folder=folder)))
@@ -614,7 +597,6 @@ def session_data(node_name: str, round_id: str, session: int) -> dict:
     outcome = _session_summary(round_dir=round_dir, session_dir=folder, entries=variants.tree_load(), now=time.time())
     checks = round_dir / "checks" / folder.name
     outcome["checks"] = {name: _rejection(folder=checks / name) for name in outcome["rejected"]}
-    outcome["none"] = (_none(session_dir=folder) or "")[:4_000]
     data["outcome"] = outcome
     data["finished"] = outcome["status"] != "running"
     return data

@@ -92,6 +92,7 @@ def summary(events: Path) -> list[str]:
     for record in _records(events=events):
         kind = record.get("type")
         message = record.get("message") or {}
+        entry = record.get("entry") or {}
         if kind == "message_end" and message.get("role") == "assistant":
             turn += 1
             parts = _parts(message=message)
@@ -101,13 +102,22 @@ def summary(events: Path) -> list[str]:
             lines.append(head + (f": {' '.join(words)[:SHOWN]}" if not calls and words else ""))
             for call in calls:
                 lines.append(f"    {call.get('name')}: {json.dumps(call.get('arguments'))[:SHOWN]}")
-        elif kind == "entry_appended" and (record.get("entry") or {}).get("type") == "custom_message":
-            entry = record["entry"]
-            text = entry.get("content") if isinstance(entry.get("content"), str) else json.dumps(entry.get("content"))
-            lines.append(f"    harness message ({entry.get('customType')}): {text[:400]}")
+        elif kind == "message_end" and message.get("role") == "custom":
+            lines.append(_added(message=message))
+        elif kind == "entry_appended" and entry.get("type") == "custom_message":
+            lines.append(_added(message=entry))
+        elif kind == "entry_appended" and entry.get("type") == "custom" and entry.get("customType") == "acted":
+            lines.append(f"    acted: {json.dumps(entry.get('data'))[:SHOWN]}")
         elif kind == "auto_retry_start":
             lines.append(f"    request retried: {str(record.get('errorMessage'))[:200]}")
     return lines
+
+
+def _added(message: dict) -> str:
+    """A message the package added for the model, with pi.sendMessage or in a turn_end or agent_before_settle result"""
+    content = message.get("content")
+    text = content if isinstance(content, str) else " ".join(str(p.get("text") or "") for p in _parts(message=message))
+    return f"    harness message ({message.get('customType')}): {text[:400]}"
 
 
 def answers(events: Path) -> list[bool]:

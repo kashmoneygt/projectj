@@ -31,7 +31,7 @@ class Harness(Protocol):
 
     def prepare(self, instances: list[core.Instance]) -> None: ...
     def run(self, ctx: RunContext) -> core.TaskRun:
-        """Run one task, saving its message as TASK_FILE in ctx.out_dir as it starts"""
+        """Run one task after the instance's setup commands, saving its message as TASK_FILE in ctx.out_dir"""
 
     def contract(self) -> str:
         """Hash of what every run gets besides the variant"""
@@ -39,8 +39,8 @@ class Harness(Protocol):
     def records_activations(self, *, package: Path) -> bool:
         """Check if a variant logs when it kicks in, so we can count how often it did"""
 
-    def transcript(self, *, instance_dir: Path, full: bool) -> str:
-        """The run turn by turn, compact (to read many) or full (to search)"""
+    def run_files(self, *, instance_dir: Path) -> dict[str, Path]:
+        """The files of a run the teacher reads, by the name it sees them under (nothing that says if it passed)"""
 
     def trajectory(self, *, instance_dir: Path) -> views.Trajectory:
         """The run as the viewer shows it, read again while it's going"""
@@ -58,7 +58,7 @@ class Harness(Protocol):
         name: str,
         terms: tuple[str, ...],
     ) -> AbstractContextManager[str]:
-        """Start the teacher's container: workspace at /work (read-only), out_dir at /out"""
+        """Start the teacher's container: workspace at /work (read-only), out_dir at /out, check-variant, try-variant"""
 
     def validate_variant(self, *, variant: Path, out_dir: Path, terms: tuple[str, ...]) -> list[str]:
         """A variant package's problems (the log goes in out_dir)"""

@@ -18,7 +18,7 @@ the vocabulary onto its own mechanisms in `harnesses/<name>/`, and its `HARNESS.
 
 ## What a variant may propose
 
-| # | Thing | pi (verified on 1.4.0) | deepseek-harness (verified in source) |
+| # | Thing | pi (verified on 1.5.2) | deepseek-harness (verified in source) |
 |---|---|---|---|
 | 1 | System prompt / persona | `SYSTEM.md` replaces pi's default system prompt, `APPEND_SYSTEM.md` adds to it; `before_agent_start` returning `systemPrompt` | `dsh-system-prompt` sections (agent-scoped override of same-named globals); persona rows patchable |
 | 2 | Guardrails | rules in the system prompt; hard enforcement via `tool_call` block | `guard/` family (repeat-tool reminder, per-call timeout — tunable or removable by composition); `tools/pre-execute` |
@@ -63,7 +63,8 @@ on, and a person who just asked would not. The rest is up to the teacher and to 
   reads such as thinking and its effort, the output cap), and any cap on thinking. They belong to the model axis and
   stay fixed so generations compare. How the model thinks within them is the harness's to change, through what it's
   told and what it sees.
-- **The environment** (container, repo state, network): the benchmark protocol's.
+- **The environment** (container, repo state, network): the benchmark protocol's. A benchmark may give each instance
+  setup commands (`Instance.setup`), and every harness runs them in the repo before the agent starts.
 - **The task message**: the benchmark's, written the way a person would ask for the work. The harness adds nothing to
   it, so it says nothing about how the work is judged.
 - **The evaluation contract**: the instrumentation (metrics that only read each request), the provider config and the
@@ -93,8 +94,21 @@ Each harness pins the contract as far as its extension model allows:
 
 | Harness | A variant is | Execution mode | Status |
 |---|---|---|---|
-| [pi](https://github.com/earendil-works/pi) 1.4.0 | a directory of files (markdown, config, TS extensions); the runner stages the runtime subset (allowlist, `harnesses/pi/check_variant.py`) read-only at `/opt/harness`, so the variant's card (VARIANT.md) never reaches the model; see [pi/HARNESS.md](pi/HARNESS.md) | `pi --print` (same agent and session mechanism as the TUI) | implemented |
+| [pi](https://github.com/earendil-works/pi) 1.5.2 | a directory of files (markdown, config, TS extensions); the runner stages the runtime subset (allowlist, `harnesses/pi/check_variant.py`) read-only at `/opt/harness`, so the variant's card (variant.json) never reaches the model; see [pi/HARNESS.md](pi/HARNESS.md) | `pi --print` (same agent and session mechanism as the TUI) | implemented |
 | [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | an out-of-tree plugin plus a `cordis.yml` patch, installed into a profile (`dsh plugin add` / `--patch`) | `dsh --profile headless` (one task per invocation, `--json` event stream, `--session-id`) | designed, not implemented |
 
 Markdown and config (rows 1–5, 9–10) carry over between harnesses nearly as they are; plugins (rows 6–8, 11–14) are
 written again in each harness's extension language.
+
+## The teacher's container
+
+Each harness starts the teacher's container (`Harness.teacher_container`). It has the staged evidence read-only at
+`/work`, `/out` for the teacher's variant, and two commands that work the same in every harness, since the teacher's
+prompt names them:
+
+- `check-variant <dir>` runs the checks a variant has to pass before it's run: its card, and the harness's own rules.
+- `try-variant <dir> <repo> <task file>` runs a package on a repo the way a task run does, against the agent's own
+  model, and `try-variant --question <dir>` asks the agent a question about a small repo that needs no change.
+
+The harness's own doc, copied to `/work/harness.md`, says how its packages work, what's in the files of a run the
+teacher gets (the ones `Harness.run_files` names) and how to record when a change kicks in.

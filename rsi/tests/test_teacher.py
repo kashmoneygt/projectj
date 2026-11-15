@@ -19,14 +19,14 @@ COPILOT_EVENTS = [
     {"type": "session.info", "timestamp": "2026-10-28T23:00:00.000Z", "data": {"message": "start"}},
     {"type": "user.message", "timestamp": "2026-10-28T23:00:00.000Z", "data": {"content": "Make one variant."}},
     {"type": "assistant.turn_start", "timestamp": "2026-10-28T23:00:01.000Z", "data": {}},
-    {"type": "assistant.reasoning", "timestamp": "2026-10-28T23:00:02.000Z", "data": {"content": "Read the overview."}},
+    {"type": "assistant.reasoning", "timestamp": "2026-10-28T23:00:02.000Z", "data": {"content": "Read the tree."}},
     {
         "type": "assistant.message",
         "timestamp": "2026-10-28T23:00:03.000Z",
         "data": {
             "content": "",
             "toolRequests": [
-                {"toolCallId": "c1", "name": "container-bash", "arguments": {"command": "cat /work/overview.md"}},
+                {"toolCallId": "c1", "name": "container-bash", "arguments": {"command": "cat /work/tree.json"}},
                 {
                     "toolCallId": "c2",
                     "name": "container-edit_file",
@@ -125,7 +125,9 @@ def test_copilot_runs_locked_to_its_container_with_the_users_login(
     assert command[command.index("-C") + 1] == str(tmp_path / "teacher-home" / "cwd")
     assert seen["env"]["COPILOT_HOME"] == str(tmp_path / "teacher-home") and seen["own_group"]
     server = json.loads((out / "mcp.json").read_text())["mcpServers"]["container"]
-    assert server["args"] == [copilot.container_mcp.__file__, "rsi-teacher-x"] and server["timeout"] > 3_600_000
+    assert server["args"][:2] == [copilot.container_mcp.__file__, "rsi-teacher-x"] and server["timeout"] > 3_600_000
+    # the session's deadline, so the tools can say how much time is left
+    assert abs(float(server["args"][2]) - (time.time() + 60)) < 30
     home = json.loads((tmp_path / "teacher-home" / "config.json").read_text())
     assert home == {**{k: login[k] for k in ("loggedInUsers", "lastLoggedInUser")}, "trustedFolders": [command[2]]}
     assert (result.status, result.output_tokens, result.cost) == ("ok", 900, "12.3 AI credits, 15 premium requests")
@@ -158,7 +160,7 @@ def test_a_stopped_session_still_has_its_transcript_and_cost(tmp_path: Path) -> 
         fh.write('{"type": "assistant.mess')
     text = copilot.TEACHER.transcript(session_dir=tmp_path)
     assert text.startswith("## task\n\nMake one variant.\n")
-    assert "### thinking\nRead the overview." in text and "### container-bash" in text and "→ error" in text
+    assert "### thinking\nRead the tree." in text and "### container-bash" in text and "→ error" in text
     assert "old_text occurs 0 times" in text and "(the conversation was compacted" in text
     calls, output, cost = copilot._usage(out_dir=tmp_path)
     assert (calls, output, cost) == (2, 0, "2.5 AI credits, 15 premium requests")
@@ -170,8 +172,8 @@ def test_a_teacher_session_reads_as_steps_for_the_viewer(tmp_path: Path) -> None
     assert view.user == "Make one variant."
     steps = [i for i in view.items if i.kind == "step"]
     bash, edit = steps[0].calls
-    assert steps[0].thinking == "Read the overview." and steps[0].t == 3000
-    assert (bash.name, bash.label, bash.ok, bash.ms) == ("bash", "cat /work/overview.md", True, 2000)
+    assert steps[0].thinking == "Read the tree." and steps[0].t == 3000
+    assert (bash.name, bash.label, bash.ok, bash.ms) == ("bash", "cat /work/tree.json", True, 2000)
     assert edit.name == "edit" and edit.args == {"edits": [{"old": "one", "new": "two"}]} and not edit.ok
     assert any(i.kind == "note" for i in view.items) and steps[1].text == "Done."
 
@@ -194,11 +196,11 @@ def test_the_mcp_server_speaks_mcp_and_acts_only_in_the_container(
         return 0, b"hello\n"
 
     monkeypatch.setattr(server, "in_container", fake_in_container)
+    deadline = time.time() + 30 * 60 + 30
 
     def call(method: str, params: dict) -> dict:
-        server.handle(
-            container="rsi-teacher-x", message={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        )
+        message = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        server.handle(container="rsi-teacher-x", deadline=deadline, message=message)
         return json.loads(capsys.readouterr().out)
 
     def tool(name: str, arguments: dict) -> dict:
@@ -206,28 +208,40 @@ def test_the_mcp_server_speaks_mcp_and_acts_only_in_the_container(
 
     hello = call(method="initialize", params={"protocolVersion": "2025-06-18"})
     assert hello["result"]["protocolVersion"] == "2025-06-18"
-    server.handle(container="rsi-teacher-x", message={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    server.handle(
+        container="rsi-teacher-x", deadline=deadline, message={"jsonrpc": "2.0", "method": "notifications/initialized"}
+    )
     assert capsys.readouterr().out == ""
     listed = call(method="tools/list", params={})
     assert [t["name"] for t in listed["result"]["tools"]] == ["bash", "read_file", "write_file", "edit_file"]
     ran = tool(name="bash", arguments={"command": "echo hello"})
-    assert ran["result"] == {"content": [{"type": "text", "text": "exit code 0\nhello\n"}], "isError": False}
+    shown = "exit code 0\nhello\n(30 minutes left)"
+    assert ran["result"] == {"content": [{"type": "text", "text": shown}], "isError": False}
     assert commands[-1] == ["bash", "-lc", "cd /work && echo hello"]
     refused = tool(name="edit_file", arguments={"path": "/out/a.md", "old_text": "one", "new_text": "1"})
     assert refused["result"]["isError"] and "occurs 2 times" in refused["result"]["content"][0]["text"]
     tool(name="edit_file", arguments={"path": "/out/a.md", "old_text": "two", "new_text": "2"})
     assert files["/out/a.md"] == b"one 2 one"
     read = tool(name="read_file", arguments={"path": "/out/a.md"})
-    assert read["result"]["content"][0]["text"] == "1. one 2 one"
+    assert read["result"]["content"][0]["text"] == "1. one 2 one\n(30 minutes left)"
     files["/out/long.md"] = "\n".join("x" * 100 for _ in range(400)).encode()
     long = tool(name="read_file", arguments={"path": "/out/long.md"})["result"]["content"][0]["text"]
-    assert len(long) < server.OUTPUT_CHARS + 100 and long.endswith("; the file has 400 lines)")
+    assert len(long) < server.OUTPUT_CHARS + 100 and long.endswith("; the file has 400 lines)\n(30 minutes left)")
     after = int(long.rsplit("start_line=", 1)[1].split(";")[0])
-    assert long.splitlines()[-2].startswith(f"{after - 1}. ")
+    assert long.splitlines()[-3].startswith(f"{after - 1}. ")
     assert tool(name="web_fetch", arguments={})["error"]["message"] == "unknown tool"
     assert (
         len(server.clip(text="x" * (server.OUTPUT_CHARS + 500), limit=server.OUTPUT_CHARS)) < server.OUTPUT_CHARS + 100
     )
+
+
+def test_the_time_left_reads_in_whole_minutes() -> None:
+    server = folders.module(root=paths.teachers_dir(), name="copilot", file="container_mcp.py")
+    now = time.time()
+    assert server.time_left(deadline=now + 30) == "(less than a minute left)"
+    assert server.time_left(deadline=now + 90) == "(1 minute left)"
+    assert server.time_left(deadline=now + 90 * 60 - 1) == "(89 minutes left)"
+    assert server.time_left(deadline=now - 60) == "(less than a minute left)"
 
 
 def test_the_mcp_server_answers_every_request(
@@ -241,18 +255,18 @@ def test_the_mcp_server_answers_every_request(
     monkeypatch.setattr(server, "in_container", no_docker)
 
     def call(method: str, params: object) -> dict:
-        server.handle(
-            container="rsi-teacher-x", message={"jsonrpc": "2.0", "id": 7, "method": method, "params": params}
-        )
+        message = {"jsonrpc": "2.0", "id": 7, "method": method, "params": params}
+        server.handle(container="rsi-teacher-x", deadline=time.time(), message=message)
         return json.loads(capsys.readouterr().out)
 
     failed = call(method="tools/call", params={"name": "bash", "arguments": {"command": "ls"}})
-    assert failed["result"]["isError"] and failed["result"]["content"][0]["text"] == "FileNotFoundError: docker"
+    assert failed["result"]["isError"]
+    assert failed["result"]["content"][0]["text"] == "FileNotFoundError: docker\n(less than a minute left)"
     odd = call(method="tools/call", params={"name": "write_file", "arguments": {"path": "/out/a", "content": 5}})
     assert odd["result"]["isError"] and odd["result"]["content"][0]["text"].startswith("AttributeError")
     broken = call(method="initialize", params=["not", "an", "object"])
     assert broken["id"] == 7 and broken["error"]["code"] == -32603
-    monkeypatch.setattr(server.sys, "argv", ["container_mcp.py", "rsi-teacher-x"])
+    monkeypatch.setattr(server.sys, "argv", ["container_mcp.py", "rsi-teacher-x", "0"])
     monkeypatch.setattr(server.sys, "stdin", io.StringIO('{"jsonrpc": "2.0", "id": 1, "meth\n[1, 2]\n\n'))
     server.main()
     replies = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
@@ -282,6 +296,13 @@ def test_try_variant_sums_up_a_run(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             },
         },
         {"type": "entry_appended", "entry": {"type": "custom_message", "customType": "guard", "content": "Check it."}},
+        # pi.sendMessage's messages come as messages, not entries
+        {
+            "type": "message_end",
+            "message": {"role": "custom", "customType": "nudge", "content": [{"type": "text", "text": "Run it."}]},
+        },
+        {"type": "entry_appended", "entry": {"type": "custom", "customType": "acted", "data": {"what": "nudged"}}},
+        {"type": "entry_appended", "entry": {"type": "custom", "customType": "notes", "data": {}}},
         {
             "type": "message_end",
             "message": {
@@ -298,6 +319,8 @@ def test_try_variant_sums_up_a_run(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "[1] 120 tokens, stop toolUse",
         '    bash: {"command": "pytest -q"}',
         "    harness message (guard): Check it.",
+        "    harness message (nudge): Run it.",
+        '    acted: {"what": "nudged"}',
         "[2] 9 tokens, stop stop: Fixed.",
     ]
 
@@ -470,6 +493,6 @@ def test_try_variant_stops_pi_when_it_is_stopped(tmp_path: Path) -> None:
 
 
 def test_mcp_server_runs_with_the_standard_library_alone() -> None:
-    command = [sys.executable, "-S", copilot.container_mcp.__file__, "rsi-teacher-x"]
+    command = [sys.executable, "-S", copilot.container_mcp.__file__, "rsi-teacher-x", "0"]
     done = subprocess.run(command, input="", capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr

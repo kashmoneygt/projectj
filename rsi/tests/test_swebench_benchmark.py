@@ -24,14 +24,16 @@ def test_report_path_and_read(tmp_path: Path) -> None:
     assert path.name == "gemma-4-12b.node-a.json"
     report = {
         "resolved_ids": ["a__b-1"],
-        "submitted_ids": ["a__b-1", "c__d-2", "e__f-3", "g__h-4"],
-        "error_ids": ["e__f-3"],
+        "submitted_ids": ["a__b-1", "c__d-2", "e__f-3", "g__h-4", "i__j-5"],
+        "error_ids": ["e__f-3", "i__j-5"],
         "infra_failure_ids": ["g__h-4"],
+        "failure_reasons": {"g__h-4": "out_of_memory", "i__j-5": "tests_timed_out"},
     }
     path.write_text(json.dumps(report))
     assert mod.read_report(cwd=tmp_path, model_name="gemma-4-12b", run_id="node-a") == {
         "a__b-1": True,
         "c__d-2": False,
+        "i__j-5": False,
     }
     slash = mod.report_path(cwd=tmp_path, model_name="org/model", run_id="node-a")
     assert slash.name == "org__model.node-a.json"
@@ -47,8 +49,15 @@ def test_by_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [i.instance_id for i in picked] == ["c__d-2", "a__b-1"]
     assert (picked[0].image, picked[0].workdir) == (checks.expected_image(instance_id="c__d-2"), "/testbed")
     assert picked[0].task == "Please resolve this issue:\n\np2"
+    assert picked[0].setup == mod.BENCHMARK.dataset.setup == mod.SETUP
     with pytest.raises(ValueError, match="x__y-9"):
         mod.BENCHMARK.by_ids(ids=["x__y-9"])
+
+
+def test_neither_the_setup_nor_the_work_names_the_benchmark() -> None:
+    assert "Normalize file modes" in mod.SETUP and "git config --global user.name dev" in mod.SETUP
+    for text in (mod.SETUP, mod.BENCHMARK.work):
+        assert not [term for term in mod.BENCHMARK.protocol_terms if term in text.lower()]
 
 
 def test_command_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,6 +131,7 @@ def test_score_persists_report_and_grades_the_graders_failures_again(
                     "submitted_ids": ["a__b-1", "c__d-2", "e__f-3"],
                     "error_ids": [],
                     "infra_failure_ids": ["e__f-3"],
+                    "failure_reasons": {"e__f-3": "out_of_memory"},
                 }
             )
         )

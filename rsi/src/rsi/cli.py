@@ -18,7 +18,7 @@ from rsi import benchmarks, cards, core, generation, harness, models, paths, run
 
 app = typer.Typer(help="Improve a local model's coding-agent harness on a benchmark", no_args_is_help=True)
 models_app = typer.Typer(help="Start, stop and list the model servers in models.toml", no_args_is_help=True)
-images_app = typer.Typer(help="Build or remove the Docker images tasks run in", no_args_is_help=True)
+images_app = typer.Typer(help="Build the Docker images tasks run in", no_args_is_help=True)
 variants_app = typer.Typer(help="Generate, compare and check variants", no_args_is_help=True)
 app.add_typer(models_app, name="models")
 app.add_typer(images_app, name="images")
@@ -113,10 +113,6 @@ def _variant_package(variant: str) -> Path | None:
         _stop(reason=str(exc))
 
 
-def _variant_digest(package: Path | None) -> str:
-    return variants.package_digest(package=package) if package else ""
-
-
 def require_backend(model: core.ModelSpec) -> core.ModelBackend:
     backend = models.make_backend(spec=model)
     if not backend.is_running():
@@ -166,7 +162,7 @@ def _made_here(harness_name: str, backend: core.ModelBackend, package: Path | No
     return {
         "server": backend.identity(),
         "contract": harness.load(name=harness_name).contract(),
-        "variant_digest": _variant_digest(package=package),
+        "variant_digest": variants.package_digest(package=package) if package else "",
     }
 
 
@@ -274,6 +270,10 @@ def run_tasks(
         skipped = len(instances) - len(todo)
         if skipped:
             log.info(f"finishing {node.name}: skipping {skipped} finished tasks, running {len(todo)}")
+        if todo and node.total:
+            # the old score won't cover the tasks it runs again, so the node is unscored until it's scored again
+            node.total, node.resolved, node.score = 0, 0, 0.0
+            runs.write_node(node=node)
         h.prepare(instances=instances)
         width = min(n_concurrent or node.model.parallel, node.model.parallel)
         if width < (n_concurrent or width):
@@ -403,6 +403,12 @@ def score_node(name: str, workers: int, clone_tasks: bool) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
     runs.apply_score(node=node, per_instance=per_instance)
     log.info(f"score: {node.resolved}/{node.total} resolved ({node.score}%)")
+    errored = sorted(iid for iid, run in node.runs.items() if run.status == "error")
+    if errored:
+        log.warning(
+            "tasks that ended in an error count as unresolved until you finish the run with the same `rsi run` "
+            f"command: {', '.join(errored)}"
+        )
 
 
 @models_app.command("list")
@@ -420,7 +426,7 @@ def models_list() -> None:
 
 @models_app.command("up")
 def models_up(name: str) -> None:
-    """Start a model's server, downloading the model the first time"""
+    """Start a model's server"""
     backend = models.make_backend(spec=models.get(name=name))
     if backend.is_running():
         log.info(f"{name} already running at {backend.host_url()}")
@@ -484,7 +490,7 @@ def run(
     harness_name: str = typer.Option("", "--harness", help="A folder in harnesses/ (default: the parent's, else pi)"),
     tasks: int = typer.Option(10, "--tasks", help="Number of tasks, sampled by --seed (0 for all)"),
     instances_file: str = typer.Option("", "--instances", help="File of task ids, one per line (overrides --tasks)"),
-    probe: bool = typer.Option(False, "--probe", help="The lineage's probe set (overrides --tasks and --instances)"),
+    probe: bool = typer.Option(False, "--probe", help="Run on the lineage's probe set (overrides --tasks)"),
     seed: int = typer.Option(42, "--seed", help="Seed for the --tasks sample, also part of the run's name"),
     node: str = typer.Option("", "--node", help="Node name (default: model--harness--benchmark--variant--Nt--sSEED)"),
     n_concurrent: int = typer.Option(0, "--n-concurrent", help="Tasks at once, at most the model's parallel (0 = max)"),
@@ -507,7 +513,10 @@ def run(
     if probe:
         root = _probe_root(parent=parent, model=model, harness_name=harness_name, benchmark=benchmark, timeout=timeout)
         parent = parent or root.name  # a baseline run on the probe set counts as made from the root
-        instance_ids = _lineage_probe(root=root)
+        try:
+            instance_ids = runs.lineage_probe(root=root)
+        except FileNotFoundError as exc:
+            _stop(reason=str(exc))
         log.info(f"probe set of {root.name}: {len(instance_ids)} tasks ({runs.probe_path(root=root)})")
     elif instances_file:
         instance_ids = _read_instance_ids(text_file=instances_file)
@@ -621,7 +630,7 @@ def _resumable(
 
 @app.command("tree")
 def tree_command(model: str = typer.Option("", "--model", help="Model name prefix to show")) -> None:
-    """Print every run as a tree with its score (* marks the best on each task set)"""
+    """Print every run as a tree with its score"""
     nodes = runs.list_nodes()
     if not nodes:
         _stop(reason="no nodes under runs/")
@@ -634,10 +643,7 @@ def view(
     host: str = typer.Option("127.0.0.1", "--host", help="Address to listen on (default: this machine only)"),
     open_in_browser: bool = typer.Option(False, "--open", help="Open it in the browser"),
     save: str = typer.Option("", "--save", help="Save the viewer to this HTML file to share, instead of serving it"),
-    nodes: Annotated[
-        list[str] | None,
-        typer.Option("--node", help="With --save, include only this node's trajectories (repeatable)"),
-    ] = None,
+    nodes: Annotated[list[str] | None, typer.Option("--node", help="Save only these nodes' trajectories")] = None,
 ) -> None:
     """Show the tree, runs, task trajectories and teacher sessions in a web page"""
     if not save:
@@ -668,10 +674,10 @@ def probe_command(
     tasks_file: str = typer.Option("", "--tasks", help="File of the probe's task ids, to use instead of picking them"),
     hidden_file: str = typer.Option("", "--hidden", help="With --tasks, a file of the ones hidden from the teacher"),
 ) -> None:
-    """Pick the probe set from the root's results (its failures plus 30 successes, half hidden), or take it as given"""
+    """Pick the probe set from the root's results (failures plus 30 successes, half hidden), or read it from --tasks"""
     record = _require_node(name=root)
     if record.total == 0:
-        _stop(reason=f"node {root!r} has no scored tasks; score it first")
+        _stop(reason=f"node {root!r} isn't scored yet, so score it first")
     nodes = runs.list_nodes()
     first = tree.lineage(name=record.name, nodes=nodes)[0]
     if first.name != record.name:
@@ -789,43 +795,36 @@ def report(node: str = typer.Option(..., "--node")) -> None:
 def variants_generate(
     parent: str = typer.Option(..., "--parent", help="Scored node to generate variants from"),
     teacher: str = typer.Option("opus", "--teacher", help="A teacher named in models.toml"),
-    areas: Annotated[list[str] | None, typer.Option("--area", help="An area in prompts/areas.md (repeatable)")] = None,
-    timeout: int = typer.Option(3600, "--timeout", help="Time limit per teacher session in seconds"),
+    sessions: int = typer.Option(generation.SESSIONS, "--sessions", min=1, help="Teacher sessions, one at a time"),
+    timeout: int = typer.Option(5400, "--timeout", help="Time limit per teacher session in seconds"),
 ) -> None:
-    """Generate variants from a scored node, one teacher session per area (default: open, least-covered, compose)"""
+    """Generate variants from a scored node, with each teacher session writing one"""
     record = _require_node(name=parent)
     if record.total == 0:
-        _stop(reason=f"node {record.name!r} has no scored tasks; the teacher learns from scored runs")
-    known = generation.area_texts()
-    unknown = [area for area in areas or [] if area not in known]
-    if unknown:
-        _stop(reason=f"unknown areas {', '.join(unknown)}; prompts/areas.md has {', '.join(known)}")
-    if areas and len(set(areas)) < len(areas):
-        _stop(reason="each area gets one session, so name each --area once")
+        _stop(reason=f"node {record.name!r} isn't scored yet, so score it first")
+    root = tree.lineage(name=record.name, nodes=runs.list_nodes())[0]
+    if not runs.lineage_hidden(root=root):
+        _stop(reason=f"the lineage has no probe set yet, so write it first with `rsi probe --root {root.name}`")
     _retarget_logs(node_name=record.name)
     h = harness.load(name=record.harness)
     # the teacher's container tries variants on the agent's model
     backend = require_backend(model=record.model)
     with _model_lock(model=record.model):
-        areas = areas or generation.default_areas(record=record, nodes=runs.list_nodes())
         try:
             found = generation.generate(
                 record=record,
                 h=h,
                 teacher_spec=models.teacher(name=teacher),
                 endpoint=backend.endpoint(),
-                areas=areas,
+                sessions=sessions,
                 timeout_s=timeout,
             )
         except (generation.TeacherUnavailable, harness.CheckUnavailable) as exc:
             _stop(reason=str(exc))
-    for area, reason in found.declined.items():
-        log.info(f"nothing worth running in {area}: {reason}")
-    if found.registered:
-        names = ", ".join(entry.name for entry in found.registered)
-        log.info(f"registered {names}; run each with `rsi run --variant <name> --probe`")
-    elif set(found.declined) != set(areas):
+    if not found.registered:
         _stop(reason=f"no variant was registered; the round's sessions and their problems are in {found.out}")
+    names = ", ".join(entry.name for entry in found.registered)
+    log.info(f"registered {names}; run each with `rsi run --variant <name> --probe`")
 
 
 @variants_app.command("list")
@@ -872,7 +871,7 @@ def variants_validate(
     harness_name: str = typer.Option("pi", "--harness", help="Harness to use if the variant isn't in the tree"),
     benchmark: str = typer.Option("swebench-verified", "--benchmark", help="Benchmark whose terms to check for"),
 ) -> None:
-    """Run a variant's package checks again (a generation round also asks it the question, against the model)"""
+    """Run a variant's package checks again (not the question check, which needs the model)"""
     entry = variants.tree_load().get(name)
     if entry is not None:
         parent = runs.read_node(name=entry.parent_node)
@@ -917,7 +916,7 @@ def _probe_root(parent: str, model: str, harness_name: str, benchmark: str, time
             )
         root = found[0]
     if root.total == 0:
-        _stop(reason=f"node {root.name!r} has no scored tasks; score it first")
+        _stop(reason=f"node {root.name!r} isn't scored yet, so score it first")
     return root
 
 
@@ -951,10 +950,3 @@ def _check_compares(
     if problems:
         why = "; ".join(problems)
         _stop(reason=f"this run wouldn't compare with the runs it's judged with, so it isn't started: {why}")
-
-
-def _lineage_probe(root: core.Node) -> list[str]:
-    try:
-        return runs.lineage_probe(root=root)
-    except FileNotFoundError as exc:
-        _stop(reason=str(exc))

@@ -25,7 +25,7 @@ class Teacher(Protocol):
         """The teacher, its version, model and effort"""
 
     def run(self, *, prompt: str, model: str, effort: str, container: str, out_dir: Path, timeout_s: int) -> TeacherRun:
-        """Run one session in the container, saving its record in out_dir"""
+        """Run one session in the container, ending each tool result with the time left, and keep its record"""
 
     def transcript(self, *, session_dir: Path) -> str:
         """The session turn by turn, for people to read"""

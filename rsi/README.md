@@ -6,7 +6,7 @@ We run a local model in the [pi](https://github.com/earendil-works/pi) coding-ag
 
 Currently, we have the following onboarded:
 
-- **Harness**: pi 1.4.0, changed only through pi's own packages (extensions, system prompt, settings, skills)
+- **Harness**: pi 1.5.2, changed only through pi's own packages (extensions, system prompt, settings, skills)
 - **Models**: [Qwen 3.8 27B](https://huggingface.co/Qwen/Qwen3.8-27B) served by splash and [Gemma 4 12B](https://huggingface.co/google/gemma-4-12B-it) served by llama.cpp, each with its vendor's recommended settings (see [models.toml](models.toml))
 - **Benchmark**: [SWE-bench Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified)
 - **Teacher**: Claude Opus 5.5 through GitHub Copilot CLI
@@ -31,6 +31,16 @@ for seed in 43 44 45; do uv run rsi run --model qwen-3.8-27b --benchmark swebenc
 uv run rsi variants generate --parent qwen-3.8-27b--pi--swebench-verified--baseline--100t--s42
 uv run rsi run --variant <name> --probe
 uv run rsi variants list
+
+# rerun the best two (--seed 43), then the better one again (--seed 44)
+uv run rsi run --variant <name> --probe --seed 43
+
+# if it beat its parent, run it three more times (seeds 45 to 47), since its winning run was probably lucky,
+# then have the teacher write variants from it
+uv run rsi variants generate --parent <one of its runs>
+
+# every few new parents, check the newest against the baseline
+uv run rsi compare --a <a baseline run> --b <a run of the newest parent>
 ```
 
 To watch the runs and the teacher as they go, run `uv run rsi view --open`.

@@ -2,428 +2,128 @@ import dataclasses
 import json
 import logging
 import shutil
-import statistics
 import time
-from collections import Counter
 from pathlib import Path
 
 from rsi import benchmarks, cards, core, harness, paths, runs, teacher, tree, variants
 
 log = logging.getLogger(__name__)
 
-DIFF_MAX_CHARS = 3_000  # so a task file fits one read_file call
 TEACHER_OUT = "out"  # mounted at /out in the teacher's container
-NONE = "NONE.md"  # written when the teacher has nothing worth running
-ROUND = "round.json"  # the round's teacher and areas, so the viewer knows whose sessions they are
-AREAS = ("tools", "middleware", "context")  # besides open and compose
+ROUND = "round.json"  # the round's teacher and how many sessions it asked for
+SESSIONS = 4  # teacher sessions in a round, one after another, and each sees the variants made before it
+PROBLEMS = "problems.json"  # why the checks turned a candidate down, in its folder under checks/
+# what the teacher sees of each task's run, which leaves out whether it passed
+TASK_FIELDS = {"status", "seconds", "patch", "error", "metrics"}
 
 
 @dataclasses.dataclass(frozen=True)
 class Round:
     out: Path  # the round's folder
     registered: list[variants.VariantEntry]
-    declined: dict[str, str]  # area -> why its session wrote no variant
 
 
 class TeacherUnavailable(Exception):
     """A teacher session failed before doing any work (service down or out of quota)"""
 
 
-def teacher_text(path: Path, out: Path) -> str | None:
-    """A file the teacher wrote under out, or None if it isn't there, isn't a regular file or a symlink leads to it"""
-    # the teacher writes as root, so a symlink could point at any file on the host machine
+def regular_file(path: Path, folder: Path) -> bool:
+    """Check that path is a regular file in folder that no symlink leads to"""
+    # runs and the teacher write as root, so a symlink could lead to any file on the host machine
     try:
         real = path.resolve(strict=True)
-    except OSError:
-        return None
-    if real != out.resolve() / path.relative_to(out) or not real.is_file():
-        return None
-    return real.read_text(errors="replace")
-
-
-def _tools_line(metrics: core.TaskMetrics) -> str:
-    calls = [
-        f"{name} {stat.count}" + (f" ({stat.errors} errors)" if stat.errors else "")
-        for name, stat in sorted(metrics.tool_stats.items(), key=lambda kv: -kv[1].count)
-    ]
-    return ", ".join(calls) or "none"
-
-
-def _ended(run: core.TaskRun) -> str:
-    """How a run ended ("never started", its status, or its last stop reason)"""
-    if run.status == "ok":
-        return run.metrics.stop_reason or "-"
-    return "never started" if run.metrics.requests == 0 else run.status
-
-
-def _share(part: float, whole: float) -> str:
-    return f"{part / whole:.0%}" if whole else "-"
-
-
-def _behavior_column(runs: list[core.TaskRun]) -> list[str]:
-    """One column of overview.md's behavior table (medians per task, shares of totals)"""
-    ms = [run.metrics for run in runs]
-    if not ms:
-        return ["0"] + ["-"] * 11
-    calls = sum(stat.count for m in ms for stat in m.tool_stats.values())
-    errors = sum(stat.errors for m in ms for stat in m.tool_stats.values())
-    wall = sum(run.seconds for run in runs) * 1000
-    model, tools = sum(m.model_ms for m in ms), sum(m.tool_ms for m in ms)
-    output = sum(m.output_tokens for m in ms)
-    return [
-        str(len(runs)),
-        f"{statistics.median(run.seconds for run in runs) / 60:.1f}",
-        f"{statistics.median(m.requests for m in ms):.0f}",
-        f"{statistics.median(m.output_tokens for m in ms):.0f}",
-        _share(part=sum(m.reasoning_tokens for m in ms), whole=output),
-        f"{statistics.median(m.peak_output_tokens for m in ms):.0f}",
-        str(sum(1 for m in ms if m.capped_requests)),
-        f"{calls / max(sum(m.requests for m in ms), 1):.2f}",
-        _share(part=errors, whole=calls),
-        " / ".join(_share(part=part, whole=wall) for part in (model, tools, wall - model - tools)),
-        str(sum(1 for m in ms if m.patch_lines == 0)),
-        f"{statistics.median(m.context_pct for m in ms):.0f}%",
-    ]
-
-
-_BEHAVIOR_ROWS = (
-    "tasks",
-    "minutes per task (median)",
-    "requests per task (median)",
-    "output tokens per task (median)",
-    "share of output tokens spent thinking",
-    "largest single response, tokens (median)",
-    "runs with a response cut at the output cap",
-    "tool calls per request",
-    "tool calls that returned an error",
-    "wall time: model / tools / other",
-    "runs that changed no file",
-    "peak context (median)",
-)
-
-
-def overview_markdown(record: core.Node, passes: dict[str, tuple[int, int]], diverged: list[str]) -> str:
-    runs = sorted(record.runs.values(), key=lambda run: run.instance_id)
-    groups = ([run for run in runs if run.resolved], [run for run in runs if not run.resolved], runs)
-    columns = [_behavior_column(runs=group) for group in groups]
-    lines = [
-        "# The parent run",
-        "",
-        f"- harness: {variants.variant_name(reference=record.variant)}",
-        (
-            f"- model: {record.model.name}, thinking {'on' if record.model.thinking else 'off'}, context window "
-            f"{record.model.ctx} tokens, at most {record.model.output_cap} tokens in one response (thinking included)"
-        ),
-        (
-            f"- each task gets {record.budget.timeout_s} s, with no turn limit, and a run still going then is "
-            "stopped and scored as it stands"
-        ),
-        f"- result: {len(groups[0])} of {len(runs)} tasks passed",
-    ]
-    if diverged:
-        lines += [
-            "",
-            "## Where the parent's runs disagree",
-            "",
-            (
-                "Tasks the parent's harness passed in some runs and failed in others. Same task, same harness, so "
-                "what differs is how the runs went. `tasks/diverged/<task>.md` puts one passing and one failing run "
-                "side by side."
-            ),
-            "",
-            "| task | passed |",
-            "|---|---|",
-        ]
-        lines += [f"| {task} | {passes[task][0]} of {passes[task][1]} |" for task in diverged]
-    lines += [
-        "",
-        "## How the agent works",
-        "",
-        "Across runs that passed, runs that failed, and all runs.",
-        "",
-        "| | passed | failed | all |",
-        "|---|---|---|---|",
-    ]
-    lines += [f"| {row} | {' | '.join(column[i] for column in columns)} |" for i, row in enumerate(_BEHAVIOR_ROWS)]
-    tools: dict[str, core.ToolStat] = {}
-    for run in runs:
-        for name, stat in run.metrics.tool_stats.items():
-            total = tools.setdefault(name, core.ToolStat())
-            total.count += stat.count
-            total.errors += stat.errors
-            total.ms += stat.ms
-    lines += ["", "| tool | calls | errors | total seconds |", "|---|---|---|---|"]
-    lines += [
-        f"| {name} | {total.count} | {total.errors} | {total.ms / 1000:.0f} |"
-        for name, total in sorted(tools.items(), key=lambda kv: -kv[1].count)
-    ]
-    endings: dict[str, list[bool]] = {}
-    for run in runs:
-        endings.setdefault(_ended(run=run), []).append(run.resolved)
-    lines += [
-        "",
-        "## How runs ended",
-        "",
-        (
-            "The last request's stop reason, or the run's status if it didn't end on its own. stop means the "
-            "agent finished, length means a response hit the output cap, toolUse means it ended in the middle of "
-            "a tool call, and never started means it failed before its first model request (its transcript has "
-            "the error)."
-        ),
-        "",
-        "| ending | tasks | passed |",
-        "|---|---|---|",
-    ]
-    for ending, outcomes in sorted(endings.items(), key=lambda kv: -len(kv[1])):
-        lines.append(f"| {ending} | {len(outcomes)} | {sum(outcomes)} |")
-    lines += [
-        "",
-        "## Tasks",
-        "",
-        (
-            "all runs: how many of this harness's runs passed the task, over every run of it so far. The same "
-            "harness passes and fails some tasks by chance."
-        ),
-        "",
-        (
-            "| task | passed | all runs | ended | minutes | requests | output tokens | thinking | largest response "
-            "| responses cut | peak context | tool calls | patch lines |"
-        ),
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-    ]
-    for run in runs:
-        m = run.metrics
-        passed, tries = passes.get(run.instance_id, (int(run.resolved), 1))
-        lines.append(
-            f"| {run.instance_id} | {'yes' if run.resolved else 'no'} | {passed} of {tries} | "
-            f"{_ended(run=run)} | {run.seconds / 60:.1f} | {m.requests} | {m.output_tokens} | "
-            f"{_share(part=m.reasoning_tokens, whole=m.output_tokens)} | {m.peak_output_tokens} | "
-            f"{m.capped_requests} | {m.context_pct}% | {_tools_line(metrics=m)} | {m.patch_lines} |"
-        )
-    return "\n".join(lines) + "\n"
+        return real == folder.resolve() / path.relative_to(folder) and real.is_file()
+    except (OSError, ValueError):
+        return False
 
 
 def harness_runs(record: core.Node, nodes: list[core.Node]) -> list[core.Node]:
-    """Every scored run of the parent's harness that compares with the parent"""
-    return [n for n in nodes if n.variant == record.variant and n.total > 0 and tree.comparable(a=n, b=record)]
-
-
-def pass_counts(record: core.Node, nodes: list[core.Node], hidden: set[str]) -> dict[str, tuple[int, int]]:
-    """Passes and runs per task over the harness's runs, hidden tasks left out"""
-    counts: dict[str, tuple[int, int]] = {}
-    for node in harness_runs(record=record, nodes=nodes):
-        for instance_id, run in node.runs.items():
-            if run.status != "error" and instance_id not in hidden:
-                passed, tries = counts.get(instance_id, (0, 0))
-                counts[instance_id] = (passed + run.resolved, tries + 1)
-    return counts
-
-
-def task_markdown(run: core.TaskRun, transcript: str) -> str:
-    verdict = "passed" if run.resolved else "failed"
-    metrics = run.metrics
-    thinking = _share(part=metrics.reasoning_tokens, whole=metrics.output_tokens)
-    lines = [
-        f"# {run.instance_id}: {verdict}",
-        "",
-        (
-            f"ended {_ended(run=run)} · {run.seconds / 60:.1f} min · {metrics.requests} requests · "
-            f"{metrics.output_tokens} output tokens ({thinking} thinking) · peak context {metrics.context_pct}% · "
-            f"tools: {_tools_line(metrics=metrics)}"
-        ),
+    """Every run of the record's harness in its lineage that compares with it, oldest first"""
+    root = tree.lineage(name=record.name, nodes=nodes)[0]
+    same = [
+        n
+        for n in tree.members(root=root.name, nodes=nodes)
+        if n.variant == record.variant and tree.comparable(a=n, b=record)
     ]
-    if run.error:
-        lines.append(f"error: {run.error[:300]}")
-    diff = run.patch.strip()
-    if len(diff) > DIFF_MAX_CHARS:
-        diff = diff[:DIFF_MAX_CHARS] + "\n… (diff truncated)"
-    lines += ["", "## Turns", "", transcript.rstrip(), "", "## Final diff", ""]
-    lines.append(f"```diff\n{diff}\n```" if diff else "(none: the run changed nothing)")
-    return "\n".join(lines) + "\n"
+    return sorted(same, key=lambda n: n.created)
+
+
+def stage_runs(dest: Path, ran: list[core.Node], shown: set[str], h: harness.Harness) -> None:
+    """Copy each run's shown tasks to dest/<k>/, oldest first, without whether they passed or the node's name"""
+    for k, node in enumerate([n for n in ran if shown & n.runs.keys()], start=1):
+        folder = dest / str(k)
+        tasks = {task: run for task, run in sorted(node.runs.items()) if task in shown}
+        record = {
+            "model": node.model.model_dump(),
+            "tasks": {task: run.model_dump(include=TASK_FIELDS) for task, run in tasks.items()},
+        }
+        folder.mkdir(parents=True)
+        (folder / "run.json").write_text(json.dumps(record, indent=2) + "\n")
+        for task in tasks:
+            instance_dir = paths.instances_dir(node_name=node.name) / task
+            for name, source in h.run_files(instance_dir=instance_dir).items():
+                if regular_file(path=source, folder=instance_dir):
+                    (folder / task).mkdir(exist_ok=True)
+                    shutil.copyfile(source, folder / task / name)
 
 
 def stage(record: core.Node, h: harness.Harness, dest: Path, nodes: list[core.Node]) -> Path:
-    """Stage the round's fixed files: the parent's runs, package and history, its system prompt and the harness doc"""
+    """Stage the parent's package and runs, the runs of the variants made from it and the harness doc"""
     if dest.exists():
         raise FileExistsError(f"{dest} already exists")
-    hidden = runs.lineage_hidden(root=tree.lineage(name=record.name, nodes=nodes)[0])
-    shown = record.model_copy(update={"runs": {iid: run for iid, run in record.runs.items() if iid not in hidden}})
-    (dest / "tasks" / "full").mkdir(parents=True)
+    root = tree.lineage(name=record.name, nodes=nodes)[0]
+    hidden = runs.lineage_hidden(root=root)
+    # a session staged before the lineage's probe set is written would see tasks that get hidden later
+    if root.parent is not None or not hidden:
+        raise ValueError(f"{record.name}'s lineage has no tasks hidden from the teacher yet (its root is {root.name})")
+    # only the root's tasks, so a run on other tasks, like held-out ones, never reaches the teacher
+    shown = set(tree.task_set(node=root)) - hidden
+    dest.mkdir(parents=True)
     shutil.copy2(h.doc, dest / "harness.md")
     shutil.copytree(
         variants.node_package(node=record, baseline=h.package_dir),
         dest / "parent",
         ignore=shutil.ignore_patterns(cards.FILE, ".*"),
     )
-    (dest / "log.md").write_text(
-        variants.lineage_log(
-            parent=variants.variant_name(reference=record.variant),
-            entries=variants.tree_load(),
-            nodes=nodes,
-            baseline=h.package_dir,
-        )
-    )
-    told, told_in = "", ""
-    for instance_id, run in sorted(shown.runs.items()):
-        instance_dir = paths.instances_dir(node_name=record.name) / instance_id
-        for folder, full in ((dest / "tasks", False), (dest / "tasks" / "full", True)):
-            transcript = h.transcript(instance_dir=instance_dir, full=full)
-            (folder / f"{instance_id}.md").write_text(task_markdown(run=run, transcript=transcript))
-        if not told:
-            told, told_in = h.system_context(instance_dir=instance_dir), instance_id
-    if told:
-        (dest / "system-prompt.md").write_text(
-            f"# What the model gets before the task\n\nAs the first request of the parent's run on {told_in} sent "
-            f"it.\n\n{told}"
-        )
-    passes = pass_counts(record=record, nodes=nodes, hidden=hidden)
-    diverged = stage_divergences(dest=dest, h=h, record=shown, nodes=nodes, passes=passes)
-    (dest / "overview.md").write_text(overview_markdown(record=shown, passes=passes, diverged=diverged))
+    parent_runs = harness_runs(record=record, nodes=nodes)
+    stage_runs(dest=dest / "runs" / "parent", ran=parent_runs, shown=shown, h=h)
+    # a variant made from any run of the parent's harness is one of its children
+    parents = {n.name for n in parent_runs}
+    for name, entry in variants.tree_load().items():
+        made = [n for n in variants.variant_nodes(entry=entry, nodes=nodes) if n.total > 0]
+        if entry.parent_node in parents and made:
+            stage_runs(dest=dest / "runs" / name, ran=made, shown=shown, h=h)
     return dest
 
 
-def stage_divergences(
-    dest: Path, h: harness.Harness, record: core.Node, nodes: list[core.Node], passes: dict[str, tuple[int, int]]
-) -> list[str]:
-    """Put a passing and a failing run side by side for each task the parent's harness split on"""
-    sides: dict[str, dict[bool, core.Node]] = {}
-    for node in sorted(harness_runs(record=record, nodes=nodes), key=lambda n: (n.name == record.name, n.created)):
-        for task, run in node.runs.items():
-            if task in record.runs and run.status != "error":
-                sides.setdefault(task, {})[run.resolved] = node
-    diverged = sorted(task for task, side in sides.items() if len(side) == 2)
-    folder = dest / "tasks" / "diverged"
-    if diverged:
-        folder.mkdir()
-    for task in diverged:
-        passed, tries = passes[task]
-        sections = [f"# {task}: passed in {passed} of {tries} runs of the parent's harness"]
-        for label, node in (("passed", sides[task][True]), ("failed", sides[task][False])):
-            sections.append(
-                _run_section(h=h, node=node, task=task, label=f"{label} (run {variants.run_label(node=node)})")
-            )
-        (folder / f"{task}.md").write_text("\n\n".join(sections) + "\n")
-    return diverged
-
-
-def _run_section(h: harness.Harness, node: core.Node, task: str, label: str) -> str:
-    """One run of a task under its own heading"""
-    run = node.runs[task]
-    instance_dir = paths.instances_dir(node_name=node.name) / task
-    body = task_markdown(run=run, transcript=h.transcript(instance_dir=instance_dir, full=False))
-    return f"## {label}\n\n" + body.split("\n", 1)[1].strip()
-
-
-def stage_results(
-    dest: Path,
-    h: harness.Harness,
-    entries: dict[str, variants.VariantEntry],
-    nodes: list[core.Node],
-    hidden: set[str],
-) -> dict[str, str]:
-    """Each scored variant's fixed and broken tasks, next to the parent's runs"""
-    staged: dict[str, str] = {}
-    for name, entry in entries.items():
-        runs_of_variant = [n for n in variants.variant_nodes(entry=entry, nodes=nodes) if n.total > 0]
-        child = runs_of_variant[-1] if runs_of_variant else None
-        reference = tree.reference_run(child=child, nodes=nodes) if child else None
-        if child is None or reference is None:
-            continue
-        flips = {
-            task: "fixed" if child.runs[task].resolved else "broken"
-            for task in sorted(set(child.runs) & set(reference.runs) - hidden)
-            if child.runs[task].resolved != reference.runs[task].resolved
-        }
-        folder = dest / "results" / name
-        folder.mkdir(parents=True)
-        for task, flip in flips.items():
-            runs_of = f"run {variants.run_label(node=child)}, parent run {variants.run_label(node=reference)}"
-            sections = [f"# {task}: {flip} by {name} ({runs_of})"]
-            for label, node in ((name, child), ("parent", reference)):
-                sections.append(_run_section(h=h, node=node, task=task, label=label))
-            (folder / f"{flip}-{task}.md").write_text("\n\n".join(sections) + "\n")
-        fixed = sum(flip == "fixed" for flip in flips.values())
-        staged[name] = f"{fixed} fixed and {len(flips) - fixed} broken tasks, each run next to the parent's"
-    return staged
-
-
-def turned_down(record: core.Node) -> list[str]:
-    """A line for each candidate from this parent the checks rejected, and each area a session declined"""
-    found: list[str] = []
-    for out in sorted((paths.node_dir(name=record.name) / "generations").glob("*")):
-        for problems in sorted(out.glob("checks/*/*/PROBLEMS.md")):
-            session, name = problems.parent.parent.name, problems.parent.name
-            teacher_out = out / session / TEACHER_OUT
-            card = teacher_text(path=teacher_out / "variants" / name / cards.FILE, out=teacher_out)
-            title = cards.parse(text=card or "").title or "with no title"
-            why = problems.read_text(errors="replace").splitlines()[0].removeprefix("- ")
-            found.append(f"- `{name}`, {title}. Rejected, since {why}")
-        for none in sorted(out.glob(f"session-*/{TEACHER_OUT}/variants/{NONE}")):
-            said = teacher_text(path=none, out=none.parents[1])
-            if said is None:
-                continue
-            area = none.parents[2].name.split("-", 2)[-1]
-            said = " ".join(said.split())[:300]
-            found.append(f"- The {area} session made nothing and " + (f'said "{said}"' if said else "gave no reason"))
-    return found
-
-
-def refresh_tree(
-    dest: Path, h: harness.Harness, record: core.Node, entries: dict[str, variants.VariantEntry], nodes: list[core.Node]
-) -> None:
-    """Update tree.md, tree/ and results/ right before a session"""
-    for folder in ("tree", "results"):
-        shutil.rmtree(dest / folder, ignore_errors=True)
+def refresh_tree(dest: Path, entries: dict[str, variants.VariantEntry], nodes: list[core.Node]) -> None:
+    """Update tree.json and tree/ right before a session"""
+    shutil.rmtree(dest / "tree", ignore_errors=True)
     (dest / "tree").mkdir()
     for name in entries:
-        shutil.copytree(variants.resolve_variant(reference=name), dest / "tree" / name)
-    lineage = tree.lineage(name=record.name, nodes=nodes)
-    results = stage_results(dest=dest, h=h, entries=entries, nodes=nodes, hidden=runs.lineage_hidden(root=lineage[0]))
-    chain = [variants.variant_name(reference=n.variant) for n in lineage]
-    (dest / "tree.md").write_text(
-        variants.tree_markdown(
-            entries=entries,
-            nodes=nodes,
-            lineage=chain,
-            results=results,
-            parent_node=record.name,
-            turned_down=turned_down(record=record),
+        shutil.copytree(
+            variants.resolve_variant(reference=name), dest / "tree" / name, ignore=shutil.ignore_patterns(cards.FILE)
         )
-    )
+    shown = {
+        name: {
+            # node names give the benchmark away
+            **{key: value for key, value in dataclasses.asdict(entry).items() if key != "parent_node"},
+            "outcome": variants.outcome(entry=entry, nodes=nodes),
+            "kicked_in": variants.activations(entry=entry, nodes=nodes),
+        }
+        for name, entry in entries.items()
+    }
+    (dest / "tree.json").write_text(json.dumps(shown, indent=2) + "\n")
 
 
-def area_texts() -> dict[str, str]:
-    """Each area's text from prompts/areas.md"""
-    text = (paths.project_dir() / "prompts" / "areas.md").read_text()
-    sections = (section.partition("\n") for section in text.split("\n## ")[1:])
-    return {area.strip(): " ".join(body.split()) for area, _, body in sections}
-
-
-def default_areas(record: core.Node, nodes: list[core.Node]) -> list[str]:
-    """Open first, then the least-covered areas, then compose once two variants are worth combining"""
-    lineage = tree.lineage(name=record.name, nodes=nodes)
-    root = lineage[0].name if lineage else record.name
-    members = [n.name for n in tree.members(root=root, nodes=nodes)]
-    # a session's folder is session-<n>-<area>
-    given = Counter(
-        session.name.split("-", 2)[2]
-        for name in members
-        for session in (paths.node_dir(name=name) / "generations").glob("*/session-*-*")
-    )
-    entries = variants.tree_load()
-    compose = len(variants.compose_candidates(record=record, entries=entries, nodes=nodes)) >= 2
-    least = sorted(AREAS, key=lambda area: given[area])  # ties keep the order in AREAS
-    return ["open", *least[: 2 if compose else 3], *(["compose"] if compose else [])]
-
-
-def prompt_text(harness_name: str, model_name: str, area: str, timeout_s: int, start: float) -> str:
+def prompt_text(harness_name: str, model_name: str, parent: str, work: str, timeout_s: int) -> str:
     text = (paths.project_dir() / "prompts" / "variant-generator.md").read_text()
     return (
         text.replace("{harness}", harness_name)
         .replace("{model}", model_name)
-        .replace("{area}", area_texts()[area])
+        .replace("{parent}", parent)
+        .replace("{work}", work)
         .replace("{budget}", f"{timeout_s // 60} minutes")
-        .replace("{deadline}", time.strftime("%H:%M UTC", time.gmtime(start + timeout_s)))  # the container's clock
     )
 
 
@@ -460,8 +160,8 @@ def collect(
     record: core.Node,
     parent_package: Path,
     created_by: str,
-    area: str,
     round: str,
+    session: int,
     h: harness.Harness,
     terms: tuple[str, ...],
     checks: Path,
@@ -525,8 +225,8 @@ def collect(
         card=card,
         diff=diff,
         created_by=created_by,
-        area=area,
         round=round,
+        session=session,
     )
     log.info(f"registered {entry.name}: {entry.title} ({entry.diff})")
     return [entry]
@@ -534,7 +234,7 @@ def collect(
 
 def _reject(candidate: Path, problems: list[str], checks: Path) -> None:
     (checks / candidate.name).mkdir(parents=True, exist_ok=True)
-    (checks / candidate.name / "PROBLEMS.md").write_text("".join(f"- {p}\n" for p in problems))
+    (checks / candidate.name / PROBLEMS).write_text(json.dumps(problems, indent=2) + "\n")
     log.warning(f"rejected {candidate.name}: {'; '.join(problems)}")
 
 
@@ -543,30 +243,37 @@ def generate(
     h: harness.Harness,
     teacher_spec: core.TeacherSpec,
     endpoint: core.ModelEndpoint,
-    areas: list[str],
+    sessions: int,
     timeout_s: int,
 ) -> Round:
-    """Run a generation round: one teacher session per area, each writing a variant or NONE.md"""
+    """Run a generation round: teacher sessions one after another, each writing a variant"""
     out = paths.node_dir(name=record.name) / "generations" / time.strftime("%Y%m%d-%H%M%S")
     t = teacher.load(name=teacher_spec.agent)
     described = t.describe(model=teacher_spec.model, effort=teacher_spec.effort)
     log.info(
-        f"generation round for {record.name} in {out} (areas {', '.join(areas)}; "
-        f"teacher {teacher_spec.name}: {described})"
+        f"generation round for {record.name} in {out} ({sessions} sessions; teacher {teacher_spec.name}: {described})"
     )
-    out.mkdir(parents=True)
-    (out / ROUND).write_text(json.dumps({"teacher": teacher_spec.model_dump(), "areas": areas}, indent=2) + "\n")
+    # staged first, so a lineage that can't be staged leaves no empty round behind
     workspace = stage(record=record, h=h, dest=out / "stage", nodes=runs.list_nodes())
+    (out / ROUND).write_text(json.dumps({"teacher": teacher_spec.model_dump(), "sessions": sessions}, indent=2) + "\n")
     parent_package = variants.node_package(node=record, baseline=h.package_dir)
-    terms = benchmarks.banned_terms(benchmark=benchmarks.get(name=record.dataset.name)) + h.protocol_terms
+    bench = benchmarks.get(name=record.dataset.name)
+    terms = benchmarks.banned_terms(benchmark=bench) + h.protocol_terms
+    prompt = prompt_text(
+        harness_name=h.name,
+        model_name=record.model.name,
+        parent=variants.variant_name(reference=record.variant),
+        work=bench.work,
+        timeout_s=timeout_s,
+    )
     registered: list[variants.VariantEntry] = []
-    declined: dict[str, str] = {}
-    for session, area in enumerate(areas, start=1):
-        refresh_tree(dest=workspace, h=h, record=record, entries=variants.tree_load(), nodes=runs.list_nodes())
-        session_dir = out / f"session-{session}-{area}"
+    for session in range(1, sessions + 1):
+        refresh_tree(dest=workspace, entries=variants.tree_load(), nodes=runs.list_nodes())
+        session_dir = out / f"session-{session}"
         teacher_out = session_dir / TEACHER_OUT
         session_dir.mkdir(parents=True)
-        log.info(f"session {session}: area {area}")
+        log.info(f"session {session} of {sessions}")
+        (session_dir / "prompt.md").write_text(prompt)
         with h.teacher_container(
             workspace=workspace,
             out_dir=teacher_out,
@@ -575,11 +282,6 @@ def generate(
             name=f"{record.name}-{out.name}-{session}",
             terms=terms,
         ) as container:
-            # once the container is up, since the deadline counts from here
-            prompt = prompt_text(
-                harness_name=h.name, model_name=record.model.name, area=area, timeout_s=timeout_s, start=time.time()
-            )
-            (session_dir / "prompt.md").write_text(prompt)
             result = t.run(
                 prompt=prompt,
                 model=teacher_spec.model,
@@ -595,19 +297,13 @@ def generate(
             f"calls, {result.tool_calls} tool calls, {result.output_tokens} output tokens, "
             f"{result.cost or 'cost unknown'}{error}"
         )
-        produced = teacher_out / "variants"
-        said = teacher_text(path=produced / NONE, out=teacher_out)
-        if said is not None and not any(d.is_dir() for d in produced.iterdir()):
-            declined[area] = " ".join(said.split())[:600] or "it gave no reason"
-            log.info(f"session {session} found nothing worth running in area {area}: {declined[area]}")
-            continue
         found = collect(
-            produced=produced,
+            produced=teacher_out / "variants",
             record=record,
             parent_package=parent_package,
             created_by=f"teacher:{teacher_spec.name}",
-            area=area,
             round=out.name,
+            session=session,
             h=h,
             terms=terms,
             checks=out / "checks" / session_dir.name,
@@ -615,9 +311,8 @@ def generate(
         )
         registered += found
         if not found and (result.status == "error" or result.tool_calls == 0):
-            left = ", ".join(areas[session - 1 :])
             raise TeacherUnavailable(
                 f"session {session} failed before doing any work ({result.error or 'no tool calls'}), so the round "
-                f"stops; the areas left are {left}, and the round is in {out}"
+                f"stops with {sessions - session + 1} of its {sessions} sessions left; the round is in {out}"
             )
-    return Round(out=out, registered=registered, declined=declined)
+    return Round(out=out, registered=registered)

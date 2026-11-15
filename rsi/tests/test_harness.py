@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", ki
 def test_load_pi_harness() -> None:
     h = harness.load(name="pi")
     assert h.name == "pi"
-    assert h.version == "1.4.0"
+    assert h.version == "1.5.2"
     assert h.package_dir.name == "package"
 
 
@@ -180,6 +181,10 @@ def test_pi_task_script_works_in_the_tasks_folder_and_never_names_the_task(tmp_p
     assert script.startswith("set -u\ncd /work/repo\n") and "--session-id task " in script
     assert "cd /work/repo && start=" in script
     assert "django" not in script
+    set_up = ctx.instance.model_copy(update={"setup": "git config --global user.name dev\n"})
+    script = pi._task_script(ctx=dataclasses.replace(ctx, instance=set_up))
+    # the setup runs before HEAD is saved, so the patch has only the agent's changes
+    assert script.index("cd /work/repo\n") < script.index("user.name dev\n") < script.index("git rev-parse HEAD")
 
 
 def test_pi_copy_variant_resources(tmp_path: Path) -> None:
@@ -219,7 +224,7 @@ def test_pi_stage_runtime_package(tmp_path: Path) -> None:
     (package / "extensions" / "gate.ts").write_text("gate")
     (package / "skills" / "verify" / "SKILL.md").write_text("skill")
     (package / "examples" / "new-tool.ts").write_text("example")
-    (package / "VARIANT.md").write_text("# card")
+    (package / "variant.json").write_text("{}")
     (package / "NOTES.md").write_text("notes")
 
     dest = tmp_path / "staged"
@@ -236,7 +241,7 @@ def test_pi_stage_runtime_package(tmp_path: Path) -> None:
         "skills/verify/SKILL.md",
     }
     assert (dest / "extensions" / "gate.ts").read_text() == "gate"
-    assert not (dest / "VARIANT.md").exists()
+    assert not (dest / "variant.json").exists()
     assert not (dest / "NOTES.md").exists()
     assert not (dest / "examples").exists()
 

@@ -22,7 +22,8 @@ def safe_variant_name(name: str) -> str:
 
 def free_name(proposed: str, taken: Collection[str]) -> str:
     """Make the teacher's name for a variant valid and unique (-2, -3, ...)"""
-    reserved = {*taken, "baseline"}
+    # baseline is the harness as it ships, and parent holds the parent's runs in the teacher's /work/runs/
+    reserved = {*taken, "baseline", "parent"}
     base = "-".join(re.findall(r"[a-z0-9]+", proposed.lower()))[:40].strip("-") or "variant"
     if not base[0].isalpha():
         base = f"v-{base}"[:40].rstrip("-")
@@ -154,13 +155,6 @@ def unified_diff(base: Path, variant: Path) -> str:
     return "\n".join(chunks)
 
 
-LOG_DIFF_LINES = 150  # max lines of each variant's diff in log.md (tree/<name>/ has every file)
-LOG_DIFFS = 2  # the newest commits in log.md that show their diff
-
-
-FIELD_SHOWN = 400  # max characters per card field in tree.md, for variants from other parents
-
-
 @dataclasses.dataclass(frozen=True)
 class VariantEntry:
     """A variant in the tree: its card and origin (results live in node records)"""
@@ -176,8 +170,8 @@ class VariantEntry:
     expect: str
     reuses: list[str]  # variants whose ideas it builds on
     diff: str  # diff_summary vs the parent's package
-    area: str = ""  # see prompts/areas.md
     round: str = ""  # a folder in the parent node's generations/
+    session: int = 0  # its session's number in that round
     # added by hand in tree.json
     note: str = ""
 
@@ -201,8 +195,8 @@ def tree_register(
     card: cards.VariantCard,
     diff: str,
     created_by: str = "human",
-    area: str = "",
     round: str = "",
+    session: int = 0,
 ) -> VariantEntry:
     safe_variant_name(name=name)
     entries = tree_load()
@@ -223,8 +217,8 @@ def tree_register(
         expect=card.expect,
         reuses=list(card.reuses),
         diff=diff,
-        area=area,
         round=round,
+        session=session,
     )
     entries[name] = entry
     tree_save(entries=entries)
@@ -267,38 +261,32 @@ def pooled_runs(entry: VariantEntry, nodes: list[core.Node]) -> tuple[list[core.
     return [n for n in ran if tree.task_set(node=n) == tasks], reference, list(tasks)
 
 
-def pooled_result(entry: VariantEntry, nodes: list[core.Node]) -> tuple[str, str]:
-    """A variant's pooled result vs its parent, and its latest run's behavior change"""
-    same, reference, tasks = pooled_runs(entry=entry, nodes=nodes)
-    if not same:
-        made = variant_nodes(entry=entry, nodes=nodes)
-        if not made:
-            return "not run", ""
-        errors = [(task, run.error) for n in made for task, run in n.runs.items() if run.error]
-        if not errors:
-            return "not scored yet", ""
-        task, error = errors[0]
-        # drop the task id, which may be a hidden task
-        error = re.sub(re.escape(task), "<task>", error, flags=re.IGNORECASE)
-        first = " ".join(error.split())[:200].replace("|", "/")
-        return f"not scored yet; first error: {first}", ""
-    line = f"{sum(n.resolved for n in same) / len(same):.1f}/{len(tasks)} per run"
-    behavior = ""
-    if reference:
-        line += f"; {stats.evidence(variant=same, reference=reference, tasks=tasks).line()}"
-        latest = max(reference, key=lambda n: n.created)
-        behavior = tree.behavior_change(before=tree.profile(node=latest), after=tree.profile(node=same[-1]))
-    return line, behavior
+def unscored(entry: VariantEntry, nodes: list[core.Node]) -> str:
+    """Why a variant has no scored run: it wasn't run, or its runs aren't scored yet (with the first error)"""
+    made = variant_nodes(entry=entry, nodes=nodes)
+    if not made:
+        return "not run"
+    errors = [(task, run.error) for n in made for task, run in n.runs.items() if run.error]
+    if not errors:
+        return "not scored yet"
+    task, error = errors[0]
+    # drop the task id, which may be a hidden task
+    error = re.sub(re.escape(task), "<task>", error, flags=re.IGNORECASE)
+    first = " ".join(error.split())[:200].replace("|", "/")
+    return f"not scored yet; first error: {first}"
 
 
 def activations(entry: VariantEntry, nodes: list[core.Node]) -> str:
-    """How many scored task runs a variant acted on, if it logs that"""
-    ran = [n for n in variant_nodes(entry=entry, nodes=nodes) if n.total > 0]
-    package = resolve_variant(reference=ran[0].variant) if ran else None
-    if package is None or not harness.load(name=ran[0].harness).records_activations(package=package):
+    """How many scored task runs a variant kicked in on, if it logs that, and as many for its parent's harness"""
+    same, reference, _ = pooled_runs(entry=entry, nodes=nodes)
+    package = resolve_variant(reference=same[0].variant) if same else None
+    if package is None or not harness.load(name=same[0].harness).records_activations(package=package):
         return ""
-    task_runs = [run for n in ran for run in n.runs.values()]
-    return f"kicked in on {sum(run.metrics.acted > 0 for run in task_runs)} of {len(task_runs)} task runs"
+    mine = [run.metrics.acted > 0 for n in same for run in n.runs.values()]
+    theirs = [run.metrics.acted > 0 for n in reference for run in n.runs.values()]
+    line = f"kicked in on {sum(mine)} of {len(mine)} task runs"
+    # a variant carries its parent's changes, which count the same way
+    return line + (f", against {sum(theirs)} of {len(theirs)} for its parent's harness" if any(theirs) else "")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -327,6 +315,9 @@ class Standing:
         return ""
 
 
+BETTER = {"solves": "solves more", "tokens": "solves as many with fewer tokens"}  # Standing.better_by, in words
+
+
 def standing(entry: VariantEntry, nodes: list[core.Node]) -> Standing | None:
     """Compare a variant with its parent's harness, or None until both ran these tasks"""
     same, reference, tasks = pooled_runs(entry=entry, nodes=nodes)
@@ -348,10 +339,10 @@ def standing(entry: VariantEntry, nodes: list[core.Node]) -> Standing | None:
 
 def scoreboard(entry: VariantEntry, nodes: list[core.Node]) -> list[str]:
     """How a variant did against its parent's harness, as lines of text"""
-    lines = [f"from {entry.parent_node}" + (f", area {entry.area}" if entry.area else "")]
+    lines = [f"from {entry.parent_node}"]
     same, _, tasks = pooled_runs(entry=entry, nodes=nodes)
     if not same:
-        return [*lines, pooled_result(entry=entry, nodes=nodes)[0]]
+        return [*lines, unscored(entry=entry, nodes=nodes)]
     solved = sum(n.resolved for n in same) / len(same)
     lines.append(f"{len(same)} run{'s' if len(same) != 1 else ''}, {solved:.1f}/{len(tasks)} solved per run")
     found = standing(entry=entry, nodes=nodes)
@@ -368,133 +359,21 @@ def scoreboard(entry: VariantEntry, nodes: list[core.Node]) -> list[str]:
     acted = activations(entry=entry, nodes=nodes)
     if acted:
         lines.append(acted)
-    better = {"solves": "solves more", "tokens": "solves as many with fewer tokens"}.get(found.better_by)
+    better = BETTER.get(found.better_by)
     lines.append(f"better than its parent: {better}" if better else "not shown better than its parent")
     return lines
 
 
-def compose_candidates(record: core.Node, entries: dict[str, VariantEntry], nodes: list[core.Node]) -> list[str]:
-    """Variants in record's lineage that did a bit better but nothing builds on yet"""
-    lineage = tree.lineage(name=record.name, nodes=nodes)
-    made_from = {n.name for n in lineage}
-    built_on = {variant_name(reference=n.variant) for n in lineage if n.variant}
-    found: list[str] = []
-    for name, entry in entries.items():
-        if entry.parent_node not in made_from or name in built_on:
-            continue
-        same, reference, tasks = pooled_runs(entry=entry, nodes=nodes)
-        if (
-            same
-            and reference
-            and (
-                stats.evidence(variant=same, reference=reference, tasks=tasks).gain > 0
-                or stats.token_evidence(variant=same, reference=reference, tasks=tasks).saving > 0
-            )
-        ):
-            found.append(name)
-    return found
-
-
-def ancestry(name: str, entries: dict[str, VariantEntry]) -> list[str]:
-    """The variants from the baseline up to name, oldest first"""
-    chain: list[str] = []
-    while name in entries and name not in chain:
-        chain.append(name)
-        name = entries[name].parent
-    return chain[::-1]
-
-
-def lineage_log(parent: str, entries: dict[str, VariantEntry], nodes: list[core.Node], baseline: Path) -> str:
-    """How the parent was built, like `git log -p` from the baseline, with each variant's card and diff"""
-    lines = ["# How the parent was built", ""]
-    if parent == "baseline":
-        return "\n".join(
-            [*lines, "The parent is the baseline, the harness as it ships, so nothing has been added yet.", ""]
-        )
-    chain = ancestry(name=parent, entries=entries)
-    if not chain:
-        return "\n".join(
-            [*lines, f"The parent, `{parent}`, isn't in the tree, so only `parent/` shows what it holds.", ""]
-        )
-    shown = f"Only the newest {LOG_DIFFS} show their diff."
-    where = "`parent/` has the code they all add up to, and `tree/<name>/` has the package of each."
-    lines += [f"The parent is `{parent}`, the baseline with these variants on top, oldest first. {shown} {where}", ""]
-    for index, name in enumerate(chain):
-        entry = entries[name]
-        package = resolve_variant(reference=name)
-        card = package / cards.FILE
-        message = card.read_text(errors="replace").strip() if card.is_file() else entry.title
-        scored = pooled_result(entry=entry, nodes=nodes)[0]
-        lines += [
-            f"## {name}",
-            "",
-            f"Built on `{entry.parent}`. It changed {entry.diff} and scored {scored}.",
-            "",
-            *(f"    {line}" if line else "" for line in message.splitlines()),
-            "",
-        ]
-        if index < len(chain) - LOG_DIFFS:
-            continue
-        before = baseline if entry.parent == "baseline" else resolve_variant(reference=entry.parent)
-        diff = unified_diff(base=before, variant=package).splitlines()
-        if len(diff) > LOG_DIFF_LINES:
-            diff = [*diff[:LOG_DIFF_LINES], f"... {len(diff) - LOG_DIFF_LINES} more lines in tree/{name}/"]
-        # four backticks, so a fence inside the diff doesn't end this one
-        lines += ["````diff", *diff, "````", ""]
-    return "\n".join(lines)
-
-
-def tree_markdown(
-    entries: dict[str, VariantEntry],
-    nodes: list[core.Node],
-    lineage: list[str],
-    results: dict[str, str],
-    parent_node: str,
-    turned_down: list[str],
-) -> str:
-    """The teacher's view of the tree (tree.md)"""
-    lines = ["# Variants tried so far", ""]
-    if lineage:
-        lines += [f"The parent's lineage: {' → '.join(lineage)}. `log.md` has each of its commits.", ""]
-    if turned_down:
-        lines += ["Turned down from this parent so far, so don't build these again as they were:", "", *turned_down, ""]
-    if not entries:
-        return "\n".join([*lines, "None yet, since this is the first round.", ""])
-    by_age = sorted(entries.items(), key=lambda kv: kv[1].created)
-    siblings = [name for name, entry in by_age if entry.parent_node == parent_node]
-    if siblings:
-        made = ", ".join(f"`{name}`" for name in siblings)
-        others = "For the others, `tree/<name>/VARIANT.md` has the whole card."
-        lines += [f"Made from this parent so far: {made}. Their sections come first, with whole cards. {others}", ""]
-    lines += [
-        "A result counts every task in the fixed set, the ones you never see included.",
-        "",
-        "| variant | parent | area | title | result |",
-        "|---|---|---|---|---|",
-    ]
-    pooled = {name: pooled_result(entry=entry, nodes=nodes) for name, entry in by_age}
-    for name, entry in by_age:
-        lines.append(f"| {name} | {entry.parent} | {entry.area} | {entry.title} | {pooled[name][0]} |")
-    for name, entry in sorted(by_age, key=lambda kv: kv[0] not in siblings):
-        lines += ["", f"## {name}", "", entry.title, ""]
-        fields = [("what", entry.what), ("why", entry.why), ("expect", entry.expect)]
-        if name not in siblings:
-            fields = [field for field in fields if field[0] != "why"]
-        for key, value in fields:
-            if name not in siblings and len(value) > FIELD_SHOWN:
-                value = f"{value[:FIELD_SHOWN].rstrip()} … (all of it is in `tree/{name}/VARIANT.md`)"
-            if value:
-                lines.append(f"- {key}: {value}")
-        if entry.reuses:
-            lines.append(f"- reuses: {', '.join(entry.reuses)}")
-        lines.append(f"- changed: {entry.diff}")
-        acted = activations(entry=entry, nodes=nodes)
-        if acted:
-            lines.append(f"- {acted}")
-        if pooled[name][1]:
-            lines.append(f"- behavior, latest run vs the parent's: {pooled[name][1]}")
-        if entry.note:
-            lines.append(f"- note from the people running the variants: {entry.note}")
-        if results.get(name):
-            lines.append(f"- runs: `results/{name}/` ({results[name]})")
-    return "\n".join(lines) + "\n"
+def outcome(entry: VariantEntry, nodes: list[core.Node]) -> str:
+    """How a variant did against its parent's harness, in words and without numbers, for the teacher"""
+    found = standing(entry=entry, nodes=nodes)
+    if found is None:
+        same, _, _ = pooled_runs(entry=entry, nodes=nodes)
+        return "no run of its parent's harness to compare with yet" if same else unscored(entry=entry, nodes=nodes)
+    if found.problems:
+        return "its runs were made differently from its parent's, so they don't compare"
+    if found.broke:
+        return "it changed what's fixed, so its runs don't count"
+    if found.better_by:
+        return f"better than its parent: {BETTER[found.better_by]}"
+    return "worse than its parent: solves fewer" if found.solves.z <= -stats.NOISE_Z else "no clear difference"

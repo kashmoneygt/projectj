@@ -14,6 +14,7 @@ class Benchmark(Protocol):
     name: str
     dataset: core.DatasetSpec
     protocol_terms: tuple[str, ...]  # words for the benchmark, banned from files the agent reads
+    work: str  # what its tasks are, in a few words for the teacher that don't give the benchmark away
 
     def ensure_assets(self, clone: bool) -> None: ...
     def select(self, tasks: int, seed: int) -> list[core.Instance]: ...

@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 
 OUTPUT_CHARS = 15_000  # per tool result (Copilot only previews results over ~20 KB)
 DEFAULT_TIMEOUT_S = 600
@@ -162,18 +163,24 @@ def send(message: dict) -> None:
         sys.stdout.flush()
 
 
-def handle(container: str, message: dict) -> None:
+def time_left(deadline: float) -> str:
+    minutes = int((deadline - time.time()) // 60)
+    return "(less than a minute left)" if minutes < 1 else f"({minutes} minute{'s' if minutes > 1 else ''} left)"
+
+
+def handle(container: str, deadline: float, message: dict) -> None:
     if "id" not in message:
         return  # a notification, like notifications/initialized
     reply: dict = {"jsonrpc": "2.0", "id": message["id"]}
     try:
-        reply |= answer(container=container, method=message.get("method"), params=message.get("params") or {})
+        params = message.get("params") or {}
+        reply |= answer(container=container, deadline=deadline, method=message.get("method"), params=params)
     except Exception as exc:  # noqa: BLE001
         reply["error"] = {"code": -32603, "message": f"{type(exc).__name__}: {exc}"}
     send(message=reply)
 
 
-def answer(container: str, method: object, params: dict) -> dict:
+def answer(container: str, deadline: float, method: object, params: dict) -> dict:
     if method == "initialize":
         return {
             "result": {
@@ -189,7 +196,8 @@ def answer(container: str, method: object, params: dict) -> dict:
             text, is_error = HANDLERS[params["name"]](container=container, arguments=params.get("arguments") or {})
         except Exception as exc:  # noqa: BLE001
             text, is_error = f"{type(exc).__name__}: {exc}", True
-        return {"result": {"content": [{"type": "text", "text": text}], "isError": is_error}}
+        shown = f"{text.rstrip()}\n{time_left(deadline=deadline)}"
+        return {"result": {"content": [{"type": "text", "text": shown}], "isError": is_error}}
     if method == "tools/call":
         return {"error": {"code": -32601, "message": "unknown tool"}}
     if method == "ping":
@@ -198,7 +206,7 @@ def answer(container: str, method: object, params: dict) -> dict:
 
 
 def main() -> None:
-    container = sys.argv[1]
+    container, deadline = sys.argv[1], float(sys.argv[2])
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -211,7 +219,8 @@ def main() -> None:
             send(message={"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "not a request"}})
             continue
         # a tool call can take minutes, so each request gets its own thread
-        threading.Thread(target=handle, kwargs={"container": container, "message": message}, daemon=True).start()
+        kwargs = {"container": container, "deadline": deadline, "message": message}
+        threading.Thread(target=handle, kwargs=kwargs, daemon=True).start()
 
 
 if __name__ == "__main__":
