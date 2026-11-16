@@ -13,6 +13,10 @@ from typing import Protocol
 # request lines leave out the conversation, and log longer parameters by their size
 LEFT_OUT = ("messages", "tools", "functions")
 LONGEST = 1000
+# Docker Desktop's way to the host now and then leaves a new connection hanging for half a minute or more,
+# while a new socket gets through at once. Each try waits a bit longer than the one before
+CONNECT_TRIES = 5
+CONNECT_WAIT_S = 2.0
 
 
 class Log(Protocol):
@@ -167,6 +171,22 @@ async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, tap: 
         writer.close()
 
 
+async def connect(host: str, port: int, log: Log) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    start = time.monotonic()
+    tries = 1
+    while True:
+        try:
+            streams = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=CONNECT_WAIT_S * tries)
+            break
+        except TimeoutError:
+            if tries == CONNECT_TRIES:
+                raise
+            tries += 1
+    if tries > 1:
+        log(entry={"connect": {"tries": tries, "seconds": round(time.monotonic() - start, 1)}})
+    return streams
+
+
 def logger(path: str, ip: str) -> Log:
     def log(entry: dict) -> None:
         # reopened per line, so a moved or deleted log starts again
@@ -185,12 +205,12 @@ class Upstream:
     log_path: str
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        log = logger(path=self.log_path, ip=writer.get_extra_info("peername")[0])
         try:
-            upstream_reader, upstream_writer = await asyncio.open_connection(self.host, self.port)
-        except OSError:
+            upstream_reader, upstream_writer = await connect(host=self.host, port=self.port, log=log)
+        except OSError:  # TimeoutError is one too
             writer.close()
             return
-        log = logger(path=self.log_path, ip=writer.get_extra_info("peername")[0])
         methods: collections.deque[str] = collections.deque()
         sent = Tap(read=read_requests, methods=methods, log=log)
         received = Tap(read=read_responses, methods=methods, log=log)

@@ -1,0 +1,7 @@
+{
+  "title": "Progress checks: wrap-up note after passing tests, periodic stock-take",
+  "what": "An extension appends a short progress check to tool results: when a test run passes after a source edit (at most twice per run), and at tool call 25 and every 15 calls after. Each lists the files changed so far (git status, or edited paths outside git) and asks the agent to finish if the request works, or else to name the gap in one sentence and go straight for it.",
+  "why": "In parent runs, 16% of output came after the first passing test run that followed the last source edit (median 8 more turns of reruns and re-reading). 33% came after turn 30, in 53 of 100 runs. Long runs also lost track of their own edits: 3 runs decided their changes came 'from a previous session' or answered a 'second user message'; one wasted about 25 turns.",
+  "expect": "Fewer turns once the fix works, so fewer output tokens on mid-length and long runs, with the same solves. Simulated on the parent's runs, the pass note fires in about 80% of runs and the periodic check in about 65%. Plain questions are unaffected.",
+  "reuses": []
+}

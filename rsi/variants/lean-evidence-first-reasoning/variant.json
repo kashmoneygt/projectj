@@ -1,0 +1,7 @@
+{
+  "title": "Lean, evidence-first reasoning habits in the system prompt",
+  "what": "Adds a short APPEND_SYSTEM.md section: think only as far as the next step; don't re-quote code already shown or draft code in reasoning; settle doubts by running code and printing actual values; check APIs in installed source and don't reconstruct uncheckable facts from memory at length; batch lookups; re-read your own code on unexpected failures; save slow test output to a file instead of re-running.",
+  "why": "In the parent's 100 runs 69% of output tokens are thinking. Thinking blocks over 3k chars hold 60% of it, and 296 of those 404 blocks are recalling ('recall', 'from memory', 'I believe') rather than checking. 21% of thinking is in code fences, 45% of those lines copies of code already shown. 93% of turns make one tool call; 35 runs re-ran a test command just to filter output differently; repro scripts built on misremembered APIs and wrong hand-computed asserts cost many turns.",
+  "expect": "Same solves with fewer output tokens, mostly by trimming long recall/tracing blocks and redundant turns in heavy runs. Text only, applies on every task (no kick-in count). On small trial repos: same fixes, verification kept, usually fewer tokens but noisy.",
+  "reuses": []
+}

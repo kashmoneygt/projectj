@@ -169,6 +169,31 @@ def test_forwarder_passes_every_byte_on_and_logs_who_sent_it(tmp_path: Path) -> 
     assert all(isinstance(line["time"], float) for line in lines)
 
 
+def test_forwarder_connects_again_when_a_connection_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries: list[dict] = []
+    tries: list[int] = []
+    open_connection = asyncio.open_connection
+
+    async def hangs_once(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        tries.append(port)
+        if len(tries) == 1:
+            await asyncio.sleep(60)
+        return await open_connection(host, port)
+
+    async def go() -> None:
+        server = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        _, writer = await forwarder.connect(host="127.0.0.1", port=port, log=lambda entry: entries.append(entry))
+        writer.close()
+        server.close()
+
+    monkeypatch.setattr(forwarder, "CONNECT_WAIT_S", 0.05)
+    monkeypatch.setattr(forwarder.asyncio, "open_connection", hangs_once)
+    asyncio.run(go())
+    assert len(tries) == 2
+    assert [entry["connect"]["tries"] for entry in entries] == [2]
+
+
 class _Proxy:
     def __init__(self, labels: dict[str, str], removed: list[str]) -> None:
         self.id = f"proxy-{len(removed)}"
