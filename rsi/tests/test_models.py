@@ -77,7 +77,7 @@ def test_a_pid_from_before_a_reboot_is_left_alone(tmp_path: Path, monkeypatch: p
     try:
         server.pid_path.parent.mkdir(parents=True, exist_ok=True)
         server.pid_path.write_text(str(other.pid))
-        # saved an hour before this process started
+        # date the pid file an hour before this process started, like one left from before a reboot
         before = time.time() - 3600
         os.utime(server.pid_path, (before, before))
         assert server._starting() is False

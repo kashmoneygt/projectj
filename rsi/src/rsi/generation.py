@@ -1,8 +1,9 @@
 import dataclasses
+import hashlib
 import json
 import logging
+import re
 import shutil
-import time
 from pathlib import Path
 
 from rsi import benchmarks, cards, core, harness, paths, runs, teacher, tree, variants
@@ -10,10 +11,11 @@ from rsi import benchmarks, cards, core, harness, paths, runs, teacher, tree, va
 log = logging.getLogger(__name__)
 
 TEACHER_OUT = "out"  # mounted at /out in the teacher's container
-ROUND = "round.json"  # the round's teacher and how many sessions it asked for
-SESSIONS = 4  # teacher sessions in a round, one after another, and each sees the variants made before it
-PROBLEMS = "problems.json"  # why the checks turned a candidate down, in its folder under checks/
-# what the teacher sees of each task's run, which leaves out whether it passed
+ROUND = "round.json"  # the round's teacher settings and session count
+# teacher sessions per round, all from the best harness so far. They run in turn, so each sees the earlier variants
+SESSIONS = 3
+PROBLEMS = "problems.json"  # why the checks rejected a candidate, saved in its folder under checks/
+# TaskRun fields the teacher sees, without "resolved" so the teacher can't tell which runs passed
 TASK_FIELDS = {"status", "seconds", "patch", "error", "metrics"}
 
 
@@ -28,8 +30,8 @@ class TeacherUnavailable(Exception):
 
 
 def regular_file(path: Path, folder: Path) -> bool:
-    """Check that path is a regular file in folder that no symlink leads to"""
-    # runs and the teacher write as root, so a symlink could lead to any file on the host machine
+    """Check that path is a regular file inside folder, with no symlink anywhere on the way to it"""
+    # task runs and the teacher write as root, so a symlink they leave could point at any file on the host
     try:
         real = path.resolve(strict=True)
         return real == folder.resolve() / path.relative_to(folder) and real.is_file()
@@ -38,7 +40,7 @@ def regular_file(path: Path, folder: Path) -> bool:
 
 
 def harness_runs(record: core.Node, nodes: list[core.Node]) -> list[core.Node]:
-    """Every run of the record's harness in its lineage that compares with it, oldest first"""
+    """Every run of the record's harness in its lineage with the same settings, oldest first"""
     root = tree.lineage(name=record.name, nodes=nodes)[0]
     same = [
         n
@@ -48,36 +50,48 @@ def harness_runs(record: core.Node, nodes: list[core.Node]) -> list[core.Node]:
     return sorted(same, key=lambda n: n.created)
 
 
-def stage_runs(dest: Path, ran: list[core.Node], shown: set[str], h: harness.Harness) -> None:
-    """Copy each run's shown tasks to dest/<k>/, oldest first, without whether they passed or the node's name"""
-    for k, node in enumerate([n for n in ran if shown & n.runs.keys()], start=1):
+def task_alias(task: str, kind: str) -> str:
+    """The folder name the teacher sees for a task, i.e. its kind of work plus a hash of its id"""
+    # task ids name the benchmark they come from, so the teacher never sees them
+    words = re.findall(r"[a-z0-9]+", kind.lower()) or ["task"]
+    return f"{'-'.join(words)}-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
+
+
+def stage_runs(dest: Path, ran: list[core.Node], aliases: dict[str, str], h: harness.Harness) -> None:
+    """Copy each run's tasks that have an alias to dest/<k>/, oldest first, without pass/fail, node names or task ids"""
+    for k, node in enumerate([n for n in ran if aliases.keys() & n.runs.keys()], start=1):
         folder = dest / str(k)
-        tasks = {task: run for task, run in sorted(node.runs.items()) if task in shown}
-        record = {
-            "model": node.model.model_dump(),
-            "tasks": {task: run.model_dump(include=TASK_FIELDS) for task, run in tasks.items()},
-        }
+        shown = {task: aliases[task] for task in aliases.keys() & node.runs.keys()}
+        tasks: dict[str, dict] = {}
+        for task, alias in sorted(shown.items(), key=lambda item: item[1]):
+            run = node.runs[task]
+            tasks[alias] = run.model_dump(include=TASK_FIELDS)
+            if run.error:
+                tasks[alias]["error"] = re.sub(re.escape(task), alias, run.error, flags=re.IGNORECASE)
         folder.mkdir(parents=True)
+        record = {"model": node.model.model_dump(), "tasks": tasks}
         (folder / "run.json").write_text(json.dumps(record, indent=2) + "\n")
-        for task in tasks:
+        for task, alias in shown.items():
             instance_dir = paths.instances_dir(node_name=node.name) / task
             for name, source in h.run_files(instance_dir=instance_dir).items():
                 if regular_file(path=source, folder=instance_dir):
-                    (folder / task).mkdir(exist_ok=True)
-                    shutil.copyfile(source, folder / task / name)
+                    (folder / alias).mkdir(exist_ok=True)
+                    shutil.copyfile(source, folder / alias / name)
 
 
 def stage(record: core.Node, h: harness.Harness, dest: Path, nodes: list[core.Node]) -> Path:
-    """Stage the parent's package and runs, the runs of the variants made from it and the harness doc"""
+    """Set up the teacher's workspace with the harness doc, the parent's package and runs, and its children's runs"""
     if dest.exists():
         raise FileExistsError(f"{dest} already exists")
     root = tree.lineage(name=record.name, nodes=nodes)[0]
     hidden = runs.lineage_hidden(root=root)
-    # a session staged before the lineage's probe set is written would see tasks that get hidden later
+    # stop if the lineage has no hidden tasks yet, otherwise the teacher would see tasks that get hidden later
     if root.parent is not None or not hidden:
         raise ValueError(f"{record.name}'s lineage has no tasks hidden from the teacher yet (its root is {root.name})")
-    # only the root's tasks, so a run on other tasks, like held-out ones, never reaches the teacher
-    shown = set(tree.task_set(node=root)) - hidden
+    # only show probe tasks that aren't hidden. The probe is 50/50 tasks the root solved and failed, so the root's
+    # tasks outside it would hint at how they went. This also keeps out runs on any other tasks, e.g. held-out ones
+    shown = set(runs.lineage_probe(root=root)) - hidden
+    aliases = {task: task_alias(task=task, kind=root.kinds.get(task, "")) for task in shown}
     dest.mkdir(parents=True)
     shutil.copy2(h.doc, dest / "harness.md")
     shutil.copytree(
@@ -86,18 +100,18 @@ def stage(record: core.Node, h: harness.Harness, dest: Path, nodes: list[core.No
         ignore=shutil.ignore_patterns(cards.FILE, ".*"),
     )
     parent_runs = harness_runs(record=record, nodes=nodes)
-    stage_runs(dest=dest / "runs" / "parent", ran=parent_runs, shown=shown, h=h)
-    # a variant made from any run of the parent's harness is one of its children
+    stage_runs(dest=dest / "runs" / "parent", ran=parent_runs, aliases=aliases, h=h)
+    # count variants made from any run of the parent's harness as its children, not just ones made from this node
     parents = {n.name for n in parent_runs}
     for name, entry in variants.tree_load().items():
         made = [n for n in variants.variant_nodes(entry=entry, nodes=nodes) if n.total > 0]
         if entry.parent_node in parents and made:
-            stage_runs(dest=dest / "runs" / name, ran=made, shown=shown, h=h)
+            stage_runs(dest=dest / "runs" / name, ran=made, aliases=aliases, h=h)
     return dest
 
 
 def refresh_tree(dest: Path, entries: dict[str, variants.VariantEntry], nodes: list[core.Node]) -> None:
-    """Update tree.json and tree/ right before a session"""
+    """Refresh tree.json and tree/ in the teacher's workspace right before a session"""
     shutil.rmtree(dest / "tree", ignore_errors=True)
     (dest / "tree").mkdir()
     for name in entries:
@@ -128,7 +142,7 @@ def prompt_text(harness_name: str, model_name: str, parent: str, work: str, time
 
 
 def package_problems(package: Path, h: harness.Harness, terms: tuple[str, ...], log_dir: Path) -> list[str]:
-    """A variant's problems: a missing card, or the harness's own checks"""
+    """Problems with a variant package, from the card check and the harness's own checks"""
     return cards.check(package=package) + h.validate_variant(variant=package, out_dir=log_dir, terms=terms)
 
 
@@ -167,8 +181,8 @@ def collect(
     checks: Path,
     endpoint: core.ModelEndpoint,
 ) -> list[variants.VariantEntry]:
-    """Register the session's variant if it passes the checks (the others' problems go in checks/)"""
-    # a symlink here would make every folder it leads to a candidate
+    """Register the session's variant if it passes the checks, and save the problems of rejected ones in checks/"""
+    # if produced is a symlink, every folder it points to would count as a candidate, so skip it
     found = sorted(produced.iterdir()) if produced.is_dir() and not produced.is_symlink() else []
     candidates = [d for d in found if d.is_dir() and not d.is_symlink()]
     if not candidates:
@@ -194,7 +208,7 @@ def collect(
         else:
             passed.append(candidate)
     if len(passed) > 1:
-        # each one takes hours to run, and a session is asked for one
+        # a session is asked for 1 variant and each takes hours to run, so reject them all
         names = ", ".join(candidate.name for candidate in passed)
         for candidate in passed:
             problem = f"the session handed in {len(passed)} variants that pass the checks ({names}), not one"
@@ -215,7 +229,7 @@ def collect(
     if name != candidate.name:
         log.info(f"registering {candidate.name} as {name}")
     diff = variants.diff_summary(base=parent_package, variant=candidate)
-    # package first, so a crash never leaves a tree entry without one
+    # move the package in before adding its tree entry, so a crash never leaves an entry with no package
     registry.mkdir(parents=True, exist_ok=True)
     shutil.move(str(candidate), str(registry / name))
     entry = variants.tree_register(
@@ -245,15 +259,16 @@ def generate(
     endpoint: core.ModelEndpoint,
     sessions: int,
     timeout_s: int,
+    round_id: str,
 ) -> Round:
-    """Run a generation round: teacher sessions one after another, each writing a variant"""
-    out = paths.node_dir(name=record.name) / "generations" / time.strftime("%Y%m%d-%H%M%S")
+    """Run a round's teacher sessions for one parent, one after another, each writing a variant"""
+    out = paths.node_dir(name=record.name) / "generations" / round_id
     t = teacher.load(name=teacher_spec.agent)
     described = t.describe(model=teacher_spec.model, effort=teacher_spec.effort)
     log.info(
         f"generation round for {record.name} in {out} ({sessions} sessions; teacher {teacher_spec.name}: {described})"
     )
-    # staged first, so a lineage that can't be staged leaves no empty round behind
+    # stage before writing round.json, so a lineage that can't be staged leaves no empty round folder
     workspace = stage(record=record, h=h, dest=out / "stage", nodes=runs.list_nodes())
     (out / ROUND).write_text(json.dumps({"teacher": teacher_spec.model_dump(), "sessions": sessions}, indent=2) + "\n")
     parent_package = variants.node_package(node=record, baseline=h.package_dir)
@@ -268,7 +283,10 @@ def generate(
     )
     registered: list[variants.VariantEntry] = []
     for session in range(1, sessions + 1):
-        refresh_tree(dest=workspace, entries=variants.tree_load(), nodes=runs.list_nodes())
+        nodes = runs.list_nodes()
+        root = tree.lineage(name=record.name, nodes=nodes)[0]
+        mine = variants.lineage_entries(root=root, entries=variants.tree_load(), nodes=nodes)
+        refresh_tree(dest=workspace, entries=mine, nodes=nodes)
         session_dir = out / f"session-{session}"
         teacher_out = session_dir / TEACHER_OUT
         session_dir.mkdir(parents=True)

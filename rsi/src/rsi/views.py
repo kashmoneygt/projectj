@@ -2,7 +2,7 @@ import dataclasses
 import json
 import re
 
-# how much of each part the viewer shows, in characters
+# max characters the viewer shows of thinking, text, tool output and tool args
 THINK_MAX = 30_000
 TEXT_MAX = 20_000
 OUT_MAX = 8_000
@@ -15,12 +15,12 @@ def clip(text: str, limit: int) -> str:
 
 @dataclasses.dataclass
 class Call:
-    """A tool call. Its name is bash, read, write or edit for those kinds of tool, or else the tool's own"""
+    """A tool call, named bash, read, write or edit for those kinds of tool, else by the tool's own name"""
 
     id: str
     name: str
     label: str
-    args: dict  # what it sent, trimmed (a command, content, edits or json)
+    args: dict  # clipped args as one of command, content, edits or json
     out: str | None = None
     ok: bool | None = None
     ms: float | None = None
@@ -35,7 +35,7 @@ class Step:
 
     t: float  # ms since the run started
     ms: float | None  # how long the response took
-    intent: str  # the first thing the model said to itself, as the step's title
+    intent: str  # first sentence of the thinking (or the text), used as the step title
     thinking: str
     thinking_chars: int
     text: str
@@ -56,7 +56,7 @@ class Note:
 
 @dataclasses.dataclass
 class Timing:
-    """A response's timing in ms, and the size of the request it answered"""
+    """Timings in ms for one response, and the size in tokens of the request it answered"""
 
     ttft: float | None
     total: float | None
@@ -67,18 +67,18 @@ class Timing:
 
 @dataclasses.dataclass
 class Trajectory:
-    user: str = ""  # the first message
+    user: str = ""  # the first user message
     items: list[Step | Note] = dataclasses.field(default_factory=list)
-    inflight_at: float | None = None  # when the unfinished response started, in ms
+    inflight_at: float | None = None  # when the response still in progress started, in epoch ms
     timing: list[Timing] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
 class Checks:
-    """A group of the benchmark's checks, like the tests a fix should make pass"""
+    """A group of benchmark checks, e.g. the tests a fix should make pass"""
 
     label: str
-    failing: str  # what a failing check in this group means, like "still failing"
+    failing: str  # word for a failing check in this group, e.g. "still failing"
     total: int
     passed: int
     failed: list[str]
@@ -89,14 +89,14 @@ class Verdict:
     """How the benchmark judged a task"""
 
     resolved: bool
-    applied: bool  # the change could be put in place
+    applied: bool  # the agent's changes could be applied for grading
     infra: bool  # the grader itself failed
     checks: list[Checks]
     log: str
 
 
 def call(call_id: str, name: str, args: object) -> Call:
-    """A tool call. Bash takes a command, read a path, write a path and content, and edit a path and edits"""
+    """Make a Call from args shaped like bash {command}, read {path}, write {path, content} or edit {path, edits}"""
     return Call(id=call_id, name=name, label=_label(name=name, args=args), args=_shown(name=name, args=args))
 
 
@@ -135,7 +135,7 @@ def _intent(thinking: str, text: str) -> str:
 
 
 def _shown(name: str, args: object) -> dict:
-    """What a tool call sent, trimmed (an edit keeps its old and new text for a diff)"""
+    """Clipped tool args for the viewer, keeping old and new text for edits so the viewer can show a diff"""
     if isinstance(args, dict) and name == "edit":
         edits = [e for e in args.get("edits") or [] if isinstance(e, dict)]
         return {

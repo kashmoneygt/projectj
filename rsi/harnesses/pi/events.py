@@ -11,30 +11,28 @@ from rsi import core, views
 @dataclasses.dataclass
 class TaskEvents:
     output_tokens: int = 0
-    cache_read_tokens: int = 0
-    reasoning_tokens: int = 0
-    # input + cacheRead + cacheWrite of the largest prompt
+    # tokens in the largest prompt (input + cacheRead + cacheWrite)
     peak_context_tokens: int = 0
-    peak_output_tokens: int = 0  # the largest single response
-    capped_requests: int = 0  # responses cut at the output cap
-    last_stop: str = ""  # the last response's stop reason
+    peak_output_tokens: int = 0  # largest single response
+    capped_requests: int = 0  # responses that hit the output cap
+    last_stop: str = ""  # stop reason of the last response
     tool_ms: int = 0
     tool_stats: dict[str, dict] = dataclasses.field(default_factory=dict)
-    final_event: str = ""
-    acted: int = 0  # times the variant said it kicked in
+    acted: int = 0  # times the variant logged that it kicked in
 
 
-# what a variant appends with pi.appendEntry when it acts (named in HARNESS.md)
+# HARNESS.md asks a variant to call pi.appendEntry("acted", ...) whenever it kicks in
 ACTED_ENTRY = "acted"
 
 
-# stream updates, which the final message repeats
+# don't parse stream updates, since the final message repeats them
 _DELTA_PREFIXES = ('{"type":"message_update"', '{"type":"tool_execution_update"')
 
 
 def _records(path: Path) -> Iterator[tuple[str, dict | None]]:
-    """Yield (type, record) per line, with record None for stream updates"""
-    if not path.exists():
+    """Yield (type, record) for each line, with record None for stream updates"""
+    # the agent could swap the file for a symlink or a pipe, so only read regular files
+    if path.is_symlink() or not path.is_file():
         return
     with path.open(encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -58,13 +56,11 @@ def _count_call(ev: TaskEvents, name: str, ms: int, error: bool) -> None:
 
 
 def parse_events(events: Path, seconds: float = 0.0) -> TaskEvents:
-    """Sum up a run's events. A tool call still running at the end counts until the run ended"""
+    """Sum up a run's events, counting a tool call that never finished as running until the run ended"""
     ev = TaskEvents()
     running: dict[str, str] = {}
     first_ms = answered_ms = 0
     for record_type, record in _records(path=events):
-        if record_type:
-            ev.final_event = record_type
         if record is None:
             continue
         if record_type == "message_end":
@@ -72,12 +68,10 @@ def parse_events(events: Path, seconds: float = 0.0) -> TaskEvents:
             first_ms = first_ms or message.get("timestamp") or 0
             if message.get("role") != "assistant":
                 continue
-            # a response's timestamp is when it was asked for, so it ended durationMs later
+            # the timestamp is when the response was requested, so it ended durationMs later
             answered_ms = (message.get("timestamp") or 0) + (message.get("durationMs") or 0) or answered_ms
             usage = message.get("usage") or {}
             ev.output_tokens += usage.get("output", 0)
-            ev.cache_read_tokens += usage.get("cacheRead", 0)
-            ev.reasoning_tokens += usage.get("reasoning", 0) or 0
             prompt = usage.get("input", 0) + (usage.get("cacheRead") or 0) + (usage.get("cacheWrite") or 0)
             ev.peak_context_tokens = max(ev.peak_context_tokens, prompt)
             ev.peak_output_tokens = max(ev.peak_output_tokens, usage.get("output", 0))
@@ -110,8 +104,20 @@ def has_model_output(events: Path) -> bool:
         return any('"message_end"' in line and '"assistant"' in line for line in fh)
 
 
+def drop_updates(events: Path) -> None:
+    """Rewrite a finished run's events without the stream updates, since the final events repeat them"""
+    # each bash output update repeats all the output so far, so one task's updates can take hundreds of MB
+    if events.is_symlink() or not events.is_file():
+        return
+    prefixes = tuple(prefix.encode() for prefix in _DELTA_PREFIXES)
+    kept = events.with_name(f"{events.name}.tmp")
+    with events.open("rb") as source, kept.open("wb") as dest:
+        dest.writelines(line for line in source if not line.startswith(prefixes))
+    kept.replace(events)
+
+
 def model_error(events: Path) -> str | None:
-    """The last model request's error, if it failed"""
+    """Error message of the last model request, or None if it didn't fail"""
     failed: str | None = None
     for record_type, record in _records(path=events):
         if record is None or record_type != "message_end":
@@ -123,19 +129,33 @@ def model_error(events: Path) -> str | None:
     return failed
 
 
+def final_reply(events: Path) -> str:
+    """The agent's final answer, or "" if the run didn't end on its own"""
+    reply = ""
+    for record_type, record in _records(path=events):
+        message = (record or {}).get("message") or {}
+        if record_type == "message_end" and message.get("role") == "assistant":
+            # a run cut off mid-turn ends on narration, not an answer
+            reply = _text_of(content=message.get("content")) if message.get("stopReason") == "stop" else ""
+    return reply
+
+
 def _json_lines(path: Path) -> list[dict]:
     return [record for _, record in _records(path=path) if record is not None]
 
 
-# other keys pi sends with each request
+# keys pi may send besides sampling and chat_template_kwargs (the forwarder log leaves out messages and tools)
 _REQUEST_KEYS = ("model", "stream", "stream_options", "store", "max_tokens", "max_completion_tokens")
 _CHAT_PATH = "/chat/completions"  # pi's openai-completions endpoint
-_TOKENIZE_PATH = "/tokenize"  # the metrics extension counts tokens with it
-_SIZES = ("system_tokens", "tool_def_tokens", "message_tokens")  # of a request, as the metrics extension counts them
+_TOKENIZE_PATH = "/tokenize"  # metrics.ts counts tokens with this endpoint
+_SIZES = ("system_tokens", "tool_def_tokens", "message_tokens")  # how metrics.ts splits up a request's tokens
+# allow a few requests over the call budget, since compaction calls the model without going through budget.ts
+BUDGET_SLACK = 5
+CALL_BUDGET = "call budget"  # stop reason for a run that budget.ts stopped
 
 
 def _off_spec(params: dict, model: core.ModelSpec) -> set[str]:
-    """How one request strays from the pinned model settings"""
+    """Ways one request differs from the pinned model settings"""
     found: set[str] = set()
     if params.get("model", model.model_id) != model.model_id:
         found.add(f"model {params.get('model')}")
@@ -155,7 +175,7 @@ def _off_spec(params: dict, model: core.ModelSpec) -> set[str]:
 
 
 def contract_violations(requests: Path, model: core.ModelSpec) -> list[str]:
-    """Requests off the pinned model settings, from the forwarder log"""
+    """Requests in the forwarder log that break the pinned model settings"""
     found: set[str] = set()
     for line in _json_lines(path=requests):
         path = str(line.get("path", "")).split("?")[0]
@@ -173,8 +193,10 @@ def contract_violations(requests: Path, model: core.ModelSpec) -> list[str]:
 @dataclasses.dataclass
 class ModelCalls:
     requests: int = 0
-    input_tokens: int = 0  # uncached prompt tokens, as pi counts them
-    output_tokens: int = 0
+    input_tokens: int = 0  # uncached prompt tokens, which is what pi calls input
+    output_tokens: int = 0  # thinking included
+    cache_read_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 def model_calls(requests: Path) -> ModelCalls:
@@ -188,6 +210,8 @@ def model_calls(requests: Path) -> ModelCalls:
             cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
             calls.input_tokens += max(0, (usage.get("prompt_tokens") or 0) - cached)
             calls.output_tokens += usage.get("completion_tokens") or 0
+            calls.cache_read_tokens += cached
+            calls.reasoning_tokens += (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
     return calls
 
 
@@ -201,10 +225,12 @@ def _text_of(content: object) -> str:
     )
 
 
-def task_metrics(instance_dir: Path, model: core.ModelSpec, seconds: float, patch: str) -> core.TaskMetrics:
+def task_metrics(
+    instance_dir: Path, model: core.ModelSpec, seconds: float, patch: str, max_calls: int
+) -> core.TaskMetrics:
     events = parse_events(events=instance_dir / "events.jsonl", seconds=seconds)
     requests = instance_dir / "requests.jsonl"
-    # every model call from the forwarder log, including those an extension or a second pi made
+    # take requests and tokens from the forwarder log, so calls from an extension or a second pi process count too
     calls = model_calls(requests=requests)
     lines = _json_lines(path=instance_dir / "metrics.jsonl")
     largest = max(
@@ -213,15 +239,18 @@ def task_metrics(instance_dir: Path, model: core.ModelSpec, seconds: float, patc
     timing = [m for m in lines if m.get("type") == "timing"]
     ttfts = [m.get("ttft_ms", 0) or 0 for m in timing] or [0]
     gen_s = max(seconds - events.tool_ms / 1000.0, 1.0)
+    violations = contract_violations(requests=requests, model=model)
+    if max_calls and calls.requests > max_calls + BUDGET_SLACK:
+        violations.append(f"{calls.requests} model requests, over the budget of {max_calls}")
+    stopped = any(m.get("type") == "budget" for m in lines)
     return core.TaskMetrics(
         requests=calls.requests,
         input_tokens=calls.input_tokens,
         output_tokens=calls.output_tokens,
-        cache_read_tokens=events.cache_read_tokens,
-        reasoning_tokens=events.reasoning_tokens,
+        cache_read_tokens=calls.cache_read_tokens,
+        reasoning_tokens=calls.reasoning_tokens,
         tool_ms=events.tool_ms,
         tool_stats={name: core.ToolStat(**stat) for name, stat in events.tool_stats.items()},
-        final_event=events.final_event,
         tok_s=round(events.output_tokens / gen_s, 2),
         context_pct=round(100.0 * events.peak_context_tokens / model.ctx, 1),
         system_tokens=largest.get("system_tokens", 0),
@@ -232,18 +261,18 @@ def task_metrics(instance_dir: Path, model: core.ModelSpec, seconds: float, patc
         ttft_max_ms=float(max(ttfts)),
         model_ms=int(sum(m.get("gen_ms", 0) or 0 for m in timing)),
         think_ms=int(sum(m.get("think_ms", 0) or 0 for m in timing)),
-        # metrics.ts writes nothing without the model's root URL
-        stop_reason=(timing[-1].get("stop_reason") if timing else "") or events.last_stop,
+        # fall back to pi's events, since metrics.ts writes nothing without the model's root URL
+        stop_reason=CALL_BUDGET if stopped else (timing[-1].get("stop_reason") if timing else "") or events.last_stop,
         patch_lines=len([line for line in patch.splitlines() if line.strip()]),
         peak_output_tokens=events.peak_output_tokens,
         capped_requests=events.capped_requests,
         acted=events.acted,
-        contract_violations=contract_violations(requests=requests, model=model),
+        contract_violations=violations,
     )
 
 
 def system_context(metrics: Path) -> str:
-    """The system prompt and tool definitions from the first request (saved by metrics.ts)"""
+    """System prompt and tool definitions of the first request, as metrics.ts saved them"""
     context = next((line for line in _json_lines(path=metrics) if line.get("type") == "context"), None)
     if context is None:
         return ""
@@ -252,7 +281,7 @@ def system_context(metrics: Path) -> str:
 
 
 def trajectory(events: Path, metrics: Path) -> views.Trajectory:
-    """Each response with its tool calls, the notes between them, and each response's timing"""
+    """Each response with its tool calls and timing, plus notes in between like retries and compactions"""
     view = views.Trajectory(timing=_timing(metrics=metrics))
     start: float | None = None
     calls: dict[str, views.Call] = {}
@@ -296,7 +325,7 @@ def trajectory(events: Path, metrics: Path) -> views.Trajectory:
 
 
 def _added(message: dict) -> views.Note:
-    """A message the package added for the model, from pi.sendMessage or an event handler's result"""
+    """A message the package added for the model, via pi.sendMessage or an event handler's result"""
     text = f"harness message ({message.get('customType')}): {_text_of(content=message.get('content'))}"
     return views.Note(text=views.clip(text=text, limit=400))
 
@@ -322,7 +351,7 @@ def _step(message: dict, t: float) -> views.Step:
 
 
 def _viewed_args(part: dict) -> object:
-    """A tool call's arguments, with an edit's given as its path and each edit's old and new text"""
+    """Arguments of a tool call, with an edit call shown as its path plus the old and new text of each edit"""
     args = part.get("arguments")
     if part.get("name") != "edit" or not isinstance(args, dict):
         return args
@@ -334,7 +363,7 @@ def _viewed_args(part: dict) -> object:
 
 
 def _timing(metrics: Path) -> list[views.Timing]:
-    """Each response's timing and the size of the request it answered, from the metrics extension's lines"""
+    """Timing of each response and the size of the request it answered, from the lines metrics.ts wrote"""
     lines = _json_lines(path=metrics)
     sent = sorted((line for line in lines if "type" not in line), key=lambda line: line.get("ts", 0))
     starts = [line.get("ts", 0) for line in sent]

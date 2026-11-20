@@ -18,15 +18,15 @@ from rsi import benchmarks, core, generation, harness, paths, runs, stats, teach
 log = logging.getLogger(__name__)
 
 PAGE = Path(__file__).with_name("viewer.html")
-LIVE_S = 600  # files changed this recently mean it's still running
-# max characters sent per block
+LIVE_S = 600  # treat a task, run or teacher session as still active if its files changed in the last 10 min
+# clip prompts and variant diffs to this many characters before sending them to the page
 PROMPT_MAX = 40_000
 DIFF_MAX = 80_000
 _SAFE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def tree_data() -> dict:
-    """Each lineage as a tree of harnesses, variants under the harness they came from"""
+    """Each lineage as a tree of harness cards, with each variant under the harness it was made from"""
     now = time.time()
     nodes = _nodes()
     entries = variants.tree_load()
@@ -91,7 +91,7 @@ def _harness(
     nodes: list[core.Node],
     now: float,
 ) -> dict:
-    """A harness card: its runs, solves per run and standing against its parent"""
+    """A harness card for the tree, with its runs, mean solves per run and standing against its parent"""
     on_probe = [n for n in own if n.total and probe and tree.task_set(node=n) == probe]
     scored = on_probe or [n for n in own if n.total][-1:]
     found = variants.standing(entry=entry, nodes=nodes) if entry is not None else None
@@ -100,7 +100,7 @@ def _harness(
         "title": _title(entry=entry, node=own[0] if own else None, name=name),
         "round": entry.round if entry is not None else "",
         "reuses": list(entry.reuses) if entry is not None else [],
-        "changed": entry.diff if entry is not None else "",  # the files it changed, in one line
+        "changed": entry.diff if entry is not None else "",  # one-line summary of the files the variant changed
         "created": datetime.fromisoformat(entry.created).timestamp() if entry is not None else own[0].created,
         "href": f"#node/{own[0].name}" if own else f"#variant/{name}",
         "runs": [_run_chip(node=n, probe=probe, now=now) for n in own],
@@ -116,7 +116,7 @@ def _harness(
 
 
 def _best(groups: dict[str, list[core.Node]], top: str, probe: tuple[str, ...]) -> dict | None:
-    """The variant with the most solves per run on the probe set, vs the root's harness"""
+    """The variant that solves the most per run on the probe set, compared with the root's harness"""
     on_probe = {
         name: scored
         for name, own in groups.items()
@@ -254,7 +254,7 @@ def node_data(name: str) -> dict:
         if reference
         else None,
         "card": card,
-        # a run of its parent's own harness has no diff
+        # no diff for the baseline or for another run of the parent's harness
         "diff": _diff(variant=node.variant, parent=parent, harness_name=node.harness)
         if node.variant and (parent is None or parent.variant != node.variant)
         else "",
@@ -297,7 +297,7 @@ def variant_data(name: str) -> dict:
 
 
 def flips_data() -> dict:
-    """Outcomes task by task for runs that share a task set, disagreements first"""
+    """Per task set, each task's outcome in every scored run that ran those tasks, with mixed results first"""
     nodes = sorted((n for n in _nodes() if n.total), key=lambda n: n.created)
     sets = dict.fromkeys((n.model.name, n.dataset.name, tree.task_set(node=n)) for n in nodes)
     groups = []
@@ -351,7 +351,7 @@ def _quiet_for(folder: Path, now: float) -> float:
 
 
 def _live_tasks(node: core.Node, now: float) -> set[str]:
-    """Tasks whose agent is still writing"""
+    """Tasks the agent is still working on, going by recent file changes"""
     folder = paths.instances_dir(node_name=node.name)
     if not folder.is_dir():
         return set()
@@ -376,12 +376,12 @@ def _status(node: core.Node, live: set[str], now: float) -> str:
 
 def _card(entry: variants.VariantEntry) -> dict:
     card = dataclasses.asdict(entry)
-    card["changed"] = card.pop("diff")  # the one-line summary (the full diff is sent separately)
+    card["changed"] = card.pop("diff")  # entry.diff is the one-line summary, and the full diff is sent separately
     return card
 
 
 def _diff(variant: str, parent: core.Node | None, harness_name: str) -> str:
-    """A variant package's diff against its parent's package (or the harness's own)"""
+    """Unified diff of a variant package against the parent's package, or the baseline package if there's no parent"""
     try:
         package = variants.resolve_variant(reference=variant)
     except FileNotFoundError:
@@ -408,7 +408,7 @@ def _task_row(
         state = "unscored"
     else:
         state = "passed" if run.resolved else "failed"
-    # fixed if every run of the parent's harness failed it, broken if every one passed it
+    # "fixed" if this run passed and every run of the parent's harness failed, "broken" if the reverse
     parent: list[int] | None = None
     flip = ""
     outcomes = [n.runs[iid].resolved for n in reference if iid in n.runs]
@@ -439,7 +439,7 @@ def _task_row(
 
 @functools.lru_cache(maxsize=4096)
 def _brief(path: str, stamp: float, lead: str) -> str:
-    """The task's first real line after the benchmark's lead-in, usually its title (stamp is for the cache)"""
+    """First real line of the task after the benchmark's lead-in, usually the title (stamp is only a cache key)"""
     for line in Path(path).read_text(errors="replace").removeprefix(lead).splitlines():
         line = line.strip()
         if line and not line.startswith(("#", "```", "===")):
@@ -448,7 +448,7 @@ def _brief(path: str, stamp: float, lead: str) -> str:
 
 
 def task_data(node_name: str, iid: str) -> dict:
-    """A task's trajectory, system prompt and timing, and once done its diff and eval"""
+    """A task's trajectory, system prompt and timing, plus its diff and grading once it's done"""
     nodes = _nodes()
     node = next((n for n in nodes if n.name == _safe(name=node_name)), None)
     folder = paths.instances_dir(node_name=node_name) / _safe(name=iid)
@@ -468,7 +468,7 @@ def task_data(node_name: str, iid: str) -> dict:
         dot, label = _classify(run=run, judged=judged)
         shown = dataclasses.asdict(judged) if judged is not None else None
         data["verdict"] = {"dot": dot, "label": label, "seconds": run.seconds, "eval": shown, "error": run.error}
-    # the same task in other runs of this model and benchmark, this harness first
+    # this task in other runs with the same model and benchmark, runs of the same harness first
     data["others"] = [
         {
             "name": n.name,
@@ -497,6 +497,9 @@ def _classify(run: core.TaskRun, judged: views.Verdict | None) -> tuple[str, str
     """A finished task's status dot and label"""
     if run.status == "error":
         return "err", f"error: {run.error}"
+    # check this first, since a task graded in the container it ran in can pass with no diff or after timing out
+    if judged is not None and judged.resolved:
+        return "ok", "resolved"
     if run.status == "timeout":
         return "warn", "timed out"
     if run.metrics.patch_lines == 0:
@@ -507,8 +510,6 @@ def _classify(run: core.TaskRun, judged: views.Verdict | None) -> tuple[str, str
         return "warn", "the grader failed to run"
     if not judged.applied:
         return "err", "patch didn't apply"
-    if judged.resolved:
-        return "ok", "resolved"
     return "bad", "not resolved"
 
 
@@ -575,7 +576,7 @@ def _session_summary(round_dir: Path, session_dir: Path, entries: dict[str, vari
 
 
 def _rejection(folder: Path) -> str:
-    """Why a candidate was turned down, then the end of each check's log"""
+    """Why the checks rejected a candidate variant, then the tail of each check log"""
     problems = folder / generation.PROBLEMS
     parts = ["".join(f"- {p}\n" for p in json.loads(problems.read_text()))] if problems.is_file() else []
     for log_file in sorted(folder.rglob("*.log")):
@@ -603,20 +604,20 @@ def session_data(node_name: str, round_id: str, session: int) -> dict:
 
 
 def _stamp(folder: Path) -> tuple:
-    """When each file directly in folder last changed, so a run's view is read again only once it has"""
+    """Name, mtime and size of each file directly in folder, so _view rereads a folder only after it changes"""
     found = []
     for path in sorted(folder.iterdir()) if folder.is_dir() else []:
         try:
             stat = path.stat()
         except OSError:
-            continue  # gone since the listing
+            continue  # deleted after iterdir() listed it
         found.append((path.name, stat.st_mtime_ns, stat.st_size))
     return tuple(found)
 
 
 @functools.lru_cache(maxsize=64)
 def _view(axis: str, name: str, folder: str, stamp: tuple) -> views.Trajectory:
-    """A run (from its harness) or a teacher session (from its teacher), as of stamp"""
+    """Trajectory of a task run (via its harness) or a teacher session (via its teacher), cached by stamp"""
     if axis == "harness":
         return harness.load(name=name).trajectory(instance_dir=Path(folder))
     return teacher.load(name=name).trajectory(session_dir=Path(folder))
@@ -667,7 +668,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _page(path: str, query: dict[str, object]) -> str:
-    """The URL the page asks for, encoded like encodeURIComponent"""
+    """The URL the page will ask for, quoted like encodeURIComponent so the keys in a saved file match"""
     return f"{path}?{urllib.parse.urlencode(query, quote_via=urllib.parse.quote)}"
 
 

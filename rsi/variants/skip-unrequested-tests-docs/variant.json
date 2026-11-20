@@ -1,7 +1,0 @@
-{
-  "title": "Keep work to what was asked: no unrequested tests, docs or changelog",
-  "what": "Adds a short APPEND_SYSTEM.md section: don't add tests, docs, changelog entries or features the request didn't ask for (offer them in the final message); verify with a throwaway /tmp script plus the existing tests covering the change; update only assertions encoding the old behavior; check failing tests against unchanged code (one-line git stash) and leave pre-existing failures alone.",
-  "why": "Task messages are bare issues, yet 81/100 parent diffs touch tests (68 add test functions) and 31 touch docs/changelog, some with invented PR numbers. ~23% of output tokens come after the first test-file edit. In all 5 tasks where one run added tests and the other didn't, the test-adding run cost more (geo-mean 1.9x). Worst: matplotlib-23299 spent ~70 turns debugging its own test; django-16454 ~20k tokens wiring one into test infrastructure. Only ~2 of 25 code edits after test-writing came from a new test catching a bug.",
-  "expect": "Fewer turns and output tokens on most fix/feature tasks (roughly 10-25%); verification still runs via scratch scripts and existing tests, so solves should hold. Text-only, no kick-in record. Small tries: 20-45% fewer turns; still wrote a test when asked.",
-  "reuses": []
-}

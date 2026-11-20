@@ -11,7 +11,7 @@ def rsi_root() -> Path:
 
 
 def project_dir() -> Path:
-    """The rsi source folder, which RSI_ROOT doesn't move"""
+    """The rsi source folder (RSI_ROOT doesn't change it)"""
     return Path(__file__).resolve().parents[2]
 
 

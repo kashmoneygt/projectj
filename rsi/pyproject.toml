@@ -17,7 +17,7 @@ dependencies = [
 rsi = "rsi.cli:app"
 
 [dependency-groups]
-# ruff 0.16, like jym/ and training/
+# keep ruff on 0.16 to match jym/ and training/
 dev = ["pytest>=8.3.0", "ruff>=0.11.0,<0.17"]
 
 [build-system]
@@ -33,7 +33,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 src = ["src"]
-# generated variants, and docs
+# skip generated variants and docs
 extend-exclude = ["variants", "*.md"]
 
 [tool.ruff.lint]

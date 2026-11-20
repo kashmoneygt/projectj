@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -73,7 +74,7 @@ _FIXED_SETTINGS = {
         ("defaultProvider", "defaultModel", "defaultThinkingLevel", "modelThinkingLevels", "enabledModels"),
         "picks the model, its provider or its thinking level",
     ),
-    # pi only sends a budget when the provider config names the server's budget field, and that config is the model's
+    # pi only sends a thinking budget if the provider config names the server's budget field, and that config is fixed
     "thinkingBudgets": "caps how much the model thinks, which is set with the model",
     **dict.fromkeys(("httpProxy", "transport", "websockets"), "changes how requests reach the model"),
     "cacheWarming": "sends the model requests of its own",
@@ -101,7 +102,7 @@ _DEAD_MODELS = {
 
 
 def stage_runtime_package(package: Path, dest: Path) -> Path:
-    """Copy the files the agent gets (a run mounts them at /opt/harness)"""
+    """Copy the files the agent gets into dest, which a run mounts at /opt/harness"""
     dest.mkdir(parents=True, exist_ok=True)
     for name in RUNTIME_FILES:
         if (package / name).is_file():
@@ -124,7 +125,7 @@ def copy_agent_resources(package: Path, agent_dir: Path) -> None:
 
 
 def _visible(package: Path) -> list[str]:
-    """Every path in the package except dotfiles"""
+    """Every path in the package except dotfiles and anything in dot folders"""
     return sorted(
         p.relative_to(package).as_posix()
         for p in package.rglob("*")
@@ -158,7 +159,7 @@ def _is_pattern(entry: str) -> bool:
 
 
 def _glob(pattern: str) -> re.Pattern[str]:
-    """A glob as a regex, like minimatch ('*' stays in one folder, '**' crosses folders)"""
+    """Convert a glob to a regex with minimatch's rules ('*' stays in one folder, '**' crosses folders)"""
     out = ""
     i = 0
     while i < len(pattern):
@@ -174,7 +175,7 @@ def _glob(pattern: str) -> re.Pattern[str]:
 
 
 def _entry_points(package: Path, folder: Path) -> list[str] | None:
-    """The extensions a folder names itself: package.json entries, or index.ts / index.js"""
+    """Extensions a folder declares itself (its package.json entries, else index.ts or index.js), or None"""
     manifest = _pi_manifest(folder=folder) or {}
     listed = [(folder / e).resolve() for e in manifest.get("extensions", [])]
     found = [p.relative_to(package.resolve()).as_posix() for p in listed if p.exists()]
@@ -187,7 +188,7 @@ def _entry_points(package: Path, folder: Path) -> list[str] | None:
 
 
 def _discover(package: Path, folder: Path) -> list[str]:
-    """Find the extensions in a folder the way pi does"""
+    """Find the extensions in a folder with pi's discovery rules"""
     named = _entry_points(package=package, folder=folder)
     if named is not None:
         return named
@@ -231,8 +232,30 @@ def loaded_extensions(package: Path) -> set[str]:
     return picked
 
 
+def hashed(term: str) -> str:
+    """A banned term as the terms file holds it, i.e. its length and hash, so the teacher can't read the terms"""
+    text = term.lower()
+    return f"{len(text)} {hashlib.sha256(text.encode()).hexdigest()}"
+
+
+def _named(text: str, terms: tuple[str, ...]) -> list[str]:
+    """The banned terms in lowercase text, given as hashed() lines"""
+    wanted: dict[int, set[str]] = {}
+    for line in terms:
+        size, _, digest = line.partition(" ")
+        if size.isdigit():
+            wanted.setdefault(int(size), set()).add(digest)
+    found = {
+        text[i : i + size]
+        for size, digests in wanted.items()
+        for i in range(len(text) - size + 1)
+        if hashlib.sha256(text[i : i + size].encode()).hexdigest() in digests
+    }
+    return sorted(found)
+
+
 def term_problems(package: Path, terms: tuple[str, ...]) -> list[str]:
-    """Files the agent reads that name the benchmark or its rules (the card may)"""
+    """Agent-visible files that name the benchmark or its rules (the card is allowed to)"""
     problems: list[str] = []
     for rel in _files(package=package):
         if not _is_runtime(rel=rel):
@@ -241,12 +264,12 @@ def term_problems(package: Path, terms: tuple[str, ...]) -> list[str]:
         if b"\x00" in raw:
             continue
         text = raw.decode("utf-8", "replace").lower()
-        problems += [f"{rel} names the workload or its protocol ({term!r})" for term in terms if term.lower() in text]
+        problems += [f"{rel} names the workload or its protocol ({term!r})" for term in _named(text=text, terms=terms)]
     return problems
 
 
 def static_problems(package: Path, terms: tuple[str, ...] = (), manifest: Path | None = None) -> list[str]:
-    """Problems found without starting pi (manifest is the package.json every variant keeps)"""
+    """Problems found without starting pi (manifest is the baseline package.json, which every variant keeps as is)"""
     links = sorted(p.relative_to(package).as_posix() for p in package.rglob("*") if p.is_symlink())
     if links:
         return [f"{rel} is a symlink; a package holds regular files only" for rel in links]
@@ -308,7 +331,7 @@ def static_problems(package: Path, terms: tuple[str, ...] = (), manifest: Path |
 
 
 def load_problems(package: Path, workdir: Path, timeout_s: float = 90.0) -> list[str]:
-    """Start pi with the package against a dead model, to check that it loads"""
+    """Start pi with the package against a model that never answers, to check that it loads"""
     staged = stage_runtime_package(package=package, dest=workdir / "package")
     agent = workdir / "agent"
     copy_agent_resources(package=package, agent_dir=agent)
@@ -342,7 +365,7 @@ def load_problems(package: Path, workdir: Path, timeout_s: float = 90.0) -> list
         out, err = _text(raw=exc.stdout), _text(raw=exc.stderr)
     except FileNotFoundError:
         return ["pi is not installed here"]
-    # pi prints every extension that fails to load as an "Error: Failed to load extension ..." line, then exits
+    # pi prints an "Error: Failed to load extension ..." line for each extension that fails to load, then exits
     problems = [line.strip()[:200] for line in err.splitlines() if line.startswith("Error:")]
     if not out.strip():
         problems.append("pi produced no events (it did not start)")
@@ -367,7 +390,7 @@ def check(package: Path, terms: tuple[str, ...] = (), manifest: Path | None = No
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="check-variant", description="Check a pi variant package.")
     parser.add_argument("package", type=Path)
-    parser.add_argument("--terms", type=Path, help="file of words the agent-visible files may not contain")
+    parser.add_argument("--terms", type=Path, help="file of hashed words the agent-visible files may not contain")
     parser.add_argument("--manifest", type=Path, help="the package.json every variant keeps")
     args = parser.parse_args(argv[1:])
     if not args.package.is_dir():

@@ -47,7 +47,7 @@ def pid_alive(pid: int) -> bool:
 
 
 def _started_at(pid: int) -> float | None:
-    # strptime reads English day and month names
+    # use the C locale, since strptime expects English day and month names
     found = subprocess.run(
         ["ps", "-o", "lstart=", "-p", str(pid)],
         capture_output=True,
@@ -62,14 +62,14 @@ def _started_at(pid: int) -> float | None:
 
 
 class LocalServer:
-    """Shared base for model servers on the host machine"""
+    """Base class for model servers on the host machine"""
 
     program = ""
-    ready_path = ""  # returns 200 once the model is loaded
+    ready_path = ""  # URL path that returns 200 once the model is loaded
 
     def __init__(self, spec: core.ModelSpec) -> None:
         self.spec = spec
-        self.proc: subprocess.Popen | None = None  # set when this process started it
+        self.proc: subprocess.Popen | None = None  # set only if this process started the server
 
     @property
     def log_path(self) -> Path:
@@ -77,7 +77,7 @@ class LocalServer:
 
     @property
     def pid_path(self) -> Path:
-        """Lets `models down` find the server from another process"""
+        """Pid file, so `models down` can find the server from another process"""
         return paths.models_dir() / "pids" / f"{self.spec.name}.pid"
 
     def host_url(self) -> str:
@@ -119,21 +119,21 @@ class LocalServer:
                         f"{self.program} exited early (code {self.proc.returncode}); see {self.log_path}"
                     )
             else:
-                # started by an earlier `models up`, so only its pid is known
+                # an earlier `models up` started the server, so we only have its pid
                 if self._pid() is None:
                     raise RuntimeError(f"{self.program} for {self.spec.name} died while starting; see {self.log_path}")
             time.sleep(2)
         raise TimeoutError(f"{self.program} for {self.spec.name} not ready after {timeout:.0f}s")
 
     def _pid(self) -> int | None:
-        """The pid an earlier `models up` saved, if that server still runs"""
+        """Pid saved by an earlier `models up`, or None if that server is gone"""
         try:
             written = self.pid_path.stat().st_mtime
             pid = int(self.pid_path.read_text().strip())
         except (FileNotFoundError, ValueError):
             return None
         started = _started_at(pid=pid)
-        # after a reboot, the pid can belong to a newer process
+        # after a reboot the pid can belong to a newer process, so skip it if it started after the pid file was written
         if started is None or started > written:
             return None
         return pid

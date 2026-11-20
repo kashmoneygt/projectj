@@ -68,7 +68,7 @@ def test_check_reports_files_that_never_reach_the_agent(tmp_path: Path) -> None:
     (package / "prompts").mkdir()
     (package / "prompts" / "system.md").write_text("never staged\n")
     (package / "NOTES.md").write_text("scratch\n")
-    # pi only warns about a tools/ folder
+    # pi only prints a warning for a tools/ folder, so the check has to flag it
     (package / "tools").mkdir()
     (package / "tools" / "search.ts").write_text("export default {}\n")
     problems = pi.check.static_problems(package=package)
@@ -298,30 +298,36 @@ def test_contract_violations_check_every_request_the_forwarder_logged(tmp_path: 
 
 
 def test_task_metrics_count_every_call_the_forwarder_saw(tmp_path: Path) -> None:
-    usage = {"input": 500, "output": 40, "cacheRead": 1000}
+    usage = {"input": 1493, "output": 40, "cacheRead": 7, "reasoning": 3}
     _write_events(
         path=tmp_path / "events.jsonl",
         records=[{"type": "message_end", "message": {"role": "assistant", "usage": usage}}],
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    # the agent's own events don't count, since the forwarder sees every call
-    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
-    assert (m.requests, m.input_tokens, m.output_tokens) == (0, 0, 0)
+    # usage in the agent's events.jsonl doesn't count, since the forwarder sees every model call
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="", max_calls=0)
+    assert (m.requests, m.input_tokens, m.output_tokens, m.cache_read_tokens, m.reasoning_tokens) == (0, 0, 0, 0, 0)
     chat = {"method": "POST", "path": "/v1/chat/completions", "params": {}}
     lines = [
         {"ip": "a", **chat},
         {"ip": "a", "method": "POST", "path": "/tokenize", "params": {}},
         {
             "ip": "a",
-            "usage": {"prompt_tokens": 1500, "completion_tokens": 40, "prompt_tokens_details": {"cached_tokens": 1000}},
+            "usage": {
+                "prompt_tokens": 1500,
+                "completion_tokens": 40,
+                "prompt_tokens_details": {"cached_tokens": 1000},
+                "completion_tokens_details": {"reasoning_tokens": 30},
+            },
         },
+        # e.g. a second pi process that a variant started
         {"ip": "a", **chat},
         {"ip": "a", "usage": {"prompt_tokens": 300, "completion_tokens": 25}},
     ]
     (tmp_path / "requests.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
-    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="", max_calls=0)
     assert (m.requests, m.input_tokens, m.output_tokens) == (2, 800, 65)
-    assert (m.cache_read_tokens, m.context_pct, m.tok_s) == (1000, 1.1, 4.0)
+    assert (m.cache_read_tokens, m.reasoning_tokens, m.context_pct, m.tok_s) == (1000, 30, 1.1, 4.0)
 
 
 def test_task_metrics_measure_the_whole_prompt(tmp_path: Path) -> None:
@@ -332,7 +338,7 @@ def test_task_metrics_measure_the_whole_prompt(tmp_path: Path) -> None:
         ],
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="+a\n\n")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="+a\n\n", max_calls=0)
     assert m.context_pct == 49.6
     assert m.patch_lines == 1
 
@@ -371,7 +377,7 @@ def test_task_metrics_count_the_largest_and_capped_responses(tmp_path: Path) -> 
         ],
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="", max_calls=0)
     # with no metrics.jsonl, the stop reason comes from the agent's own events
     assert (m.peak_output_tokens, m.capped_requests, m.stop_reason) == (16384, 2, "stop")
 
@@ -393,7 +399,7 @@ def test_a_call_still_running_when_the_run_ended_counts_until_then(tmp_path: Pat
         ],
     )
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=600.0, patch="")
+    m = pi.events.task_metrics(instance_dir=tmp_path, model=model, seconds=600.0, patch="", max_calls=0)
     assert (m.tool_ms, m.tool_stats["bash"].count) == (596_000, 1)
 
 
@@ -414,7 +420,9 @@ def test_model_address() -> None:
 
 def test_check_rejects_workload_terms_in_agent_visible_files(tmp_path: Path) -> None:
     package = _package(tmp_path=tmp_path)
-    terms = ("swebench", "benchmark", "hidden tests")
+    # the terms file holds hashes, so the teacher can't read the terms in its container
+    terms = tuple(pi.check.hashed(term=term) for term in ("swebench", "benchmark", "Hidden Tests"))
+    assert not [line for line in terms if "bench" in line or "hidden" in line]
     assert pi.check.static_problems(package=package, terms=terms) == []
     (package / "APPEND_SYSTEM.md").write_text("Do not try to identify the task as a known Benchmark instance.\n")
     (package / "extensions" / "done.ts").write_text("// the hidden tests check it\nexport default (pi) => {};\n")
@@ -437,7 +445,7 @@ def test_check_leaves_the_card_to_the_loop(tmp_path: Path) -> None:
 
 
 def test_scripts_run_with_the_standard_library_alone() -> None:
-    # the teacher's container runs them without rsi installed
+    # the teacher's container runs these scripts without rsi installed
     for script in (pi.CHECK_SCRIPT, pi.TRY_SCRIPT):
         done = subprocess.run(
             [sys.executable, "-S", str(script), "--help"], capture_output=True, text=True, check=False
@@ -453,7 +461,7 @@ def test_scripts_run_with_the_standard_library_alone() -> None:
 
 
 def _newer_f_strings(source: str) -> list[int]:
-    """Lines with an f-string python 3.11 can't parse: one inside another with the same quotes, or a backslash in {}"""
+    """Lines with an f-string Python 3.11 can't parse, i.e. a string in {} with the f-string's quotes or a backslash"""
     outer: list[str] = []  # the quotes of the f-strings we're inside
     found: list[int] = []
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
@@ -476,7 +484,7 @@ def _newer_f_strings(source: str) -> list[int]:
 
 
 def test_scripts_parse_on_the_containers_python() -> None:
-    # pi's image, which runs them in the containers, has python 3.11. Its parser rejects these, as tried in the image
+    # pi's image runs these scripts on Python 3.11, which can't parse the rejected strings below (tried in the image)
     rejected = ['f"{x["a"]}"', 'f"""{f"""{1}"""}"""', r'''f"{'\n'.join(x)}"''', r'''f"{f'a\n'}"''']
     accepted = ["f\"{x['a']}\"", 'f"""{x["a"]}"""', r'''f"a\n{x}"''', "f\"{f'{x}'}\""]
     assert [bool(_newer_f_strings(source=s)) for s in rejected + accepted] == [True] * 4 + [False] * 4

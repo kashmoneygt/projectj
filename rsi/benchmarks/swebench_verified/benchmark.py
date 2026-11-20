@@ -15,11 +15,12 @@ log = logging.getLogger(__name__)
 
 _TASKS_REPO_URL = "https://github.com/SWE-bench/swe-bench-tasks.git"
 TASKS_COMMIT = "3d07b464b7b311a0cbfb5ed5b2d8a3b96f84a33d"  # swe-bench-tasks commit that builds and grades every task
-NAMESPACE = "swebench"  # prefix of the image names swebench's eval looks for
-WORKDIR = "/testbed"  # where each task's repo is in its image
-# Each image's last commit and git's user are named SWE-bench, which tells the agent it's being tested. This renames
-# them without naming the benchmark, since the agent can see this script in its process list. The commit only
-# re-records file modes, so the patch still applies when it's graded in the original image.
+NAMESPACE = "swebench"  # image name prefix that swebench eval looks for
+WORKDIR = "/testbed"  # path of the task repo inside each image
+# The last commit and the git user in each image are named SWE-bench, which tells the agent it's being tested. So
+# amend that commit and set the git user as dev. Don't write the benchmark's name here, since the agent can see this
+# script in its process list. The amend keeps the same tree (that commit only changes file modes), so the patch still
+# applies when it's graded in the original image
 SETUP = (
     'if [ "$(git log -1 --format=%an)" = "$(git config --global user.name)" ]; then\n'
     "  git -c user.name=dev -c user.email=dev@localhost commit --amend --allow-empty --no-verify --quiet "
@@ -29,10 +30,10 @@ SETUP = (
     "git config --global user.email dev@localhost\n"
     "git reflog expire --expire=now --all\n"
 )
-# swebench's CLI, but building only missing eval images
+# swebench's CLI via swebench_cli.py, which only builds missing images
 SB_COMMAND = [sys.executable, str(Path(__file__).with_name("swebench_cli.py"))]
-EVAL_LOG_MAX = 18_000  # characters of the test log the viewer shows (failures first, then the end)
-# the grader's two groups of hidden tests, each with what a failing test in it means
+EVAL_LOG_MAX = 18_000  # max characters of test log the viewer shows (failure lines first, then the end)
+# the two groups of hidden tests, as (report key, label, word for a failing test in the group)
 _CHECKS = (
     ("FAIL_TO_PASS", "should pass after the fix (FAIL_TO_PASS)", "still failing"),
     ("PASS_TO_PASS", "should keep passing (PASS_TO_PASS)", "broken"),
@@ -75,15 +76,15 @@ def unbuilt(preds: Path) -> list[str]:
 
 
 def report_path(cwd: Path, model_name: str, run_id: str) -> Path:
-    """swebench v5's report path (/ in the model name becomes __)"""
+    """Path to swebench v5's report, where / in the model name becomes __"""
     return cwd / f"{model_name.replace('/', '__')}.{run_id}.json"
 
 
 def read_report(cwd: Path, model_name: str, run_id: str) -> dict[str, bool]:
-    """Whether each task resolved, leaving out the ones the grader failed on"""
+    """Whether each task resolved, leaving out tasks the grader failed on"""
     data = json.loads(report_path(cwd=cwd, model_name=model_name, run_id=run_id).read_text())
     resolved_ids = set(data["resolved_ids"])
-    # tests that hang past the time limit fail the task, since grading it again hangs again
+    # count a test timeout as a fail, since grading again would just hang again
     timed_out = {iid for iid, why in data["failure_reasons"].items() if why == "tests_timed_out"}
     ungraded = (set(data["error_ids"]) | set(data["infra_failure_ids"])) - timed_out
     return {iid: iid in resolved_ids for iid in data["submitted_ids"] if iid not in ungraded}
@@ -110,6 +111,8 @@ def _instance(row: dict, dataset: core.DatasetSpec) -> core.Instance:
         workdir=WORKDIR,
         task=dataset.request.replace("{task}", row["problem_statement"].strip()),
         setup=dataset.setup,
+        # use a login shell, since the images set up the repo's conda env in the login profile
+        login=True,
     )
 
 
@@ -135,9 +138,9 @@ class SweBenchVerified:
         "base commit",
         "benchmark",
         "resolved rate",
-        "hidden tests",  # how its tasks are graded
-        "testbed",  # every task's repo path
-        # the tasks' repos (not pytest or requests, which any project may use)
+        "hidden tests",  # how the tasks are graded
+        "testbed",  # the repo path in every image
+        # the task repos, minus pytest and requests since any project may use them
         "astropy",
         "django",
         "flask",
@@ -170,7 +173,7 @@ class SweBenchVerified:
             raise RuntimeError(f"{repo} is at {head.stdout.strip()[:12] or 'no commit'}, not {TASKS_COMMIT[:12]}")
 
     def select(self, tasks: int, seed: int) -> list[core.Instance]:
-        """A seeded sample of `tasks` rows spread across the repos (0 means all), the same on every machine"""
+        """Seeded sample of `tasks` tasks spread across repos (0 for all), the same on every machine"""
         rows = {row["instance_id"]: row for row in benchmarks.rows(spec=self.dataset)}
         ids = list(rows)
         if 0 < tasks < len(ids):
@@ -203,15 +206,15 @@ class SweBenchVerified:
     ) -> dict[str, bool]:
         missing = unbuilt(preds=preds)
         if missing:
-            # otherwise the eval builds its own, and grades in an image the agent never ran in
+            # otherwise swebench builds its own image and grades in one the agent never ran in
             raise RuntimeError(f"no image for {', '.join(missing)}; build them with `rsi images build`")
-        # swebench takes the model name from the preds file
+        # no model name flag, since swebench reads it from the preds file
         args = ["eval", self.alias, "-p", str(preds), "--run-id", run_id, "-j", str(workers)]
         run_sb(args=args + ["--task-repo", str(tasks_repo())], cwd=cwd)
         report = report_path(cwd=cwd, model_name=model_name, run_id=run_id)
         logs = cwd / "logs" / "run_evaluation" / run_id / model_name
         for instance_id in json.loads(report.read_text())["infra_failure_ids"]:
-            # swebench skips tasks it already has a report for, so remove it to grade it again
+            # swebench skips tasks with a report, so delete the logs of infra failures to grade them again next time
             shutil.rmtree(logs / instance_id, ignore_errors=True)
         per_instance = read_report(cwd=cwd, model_name=model_name, run_id=run_id)
         persist_eval_artifacts(src=logs, instances_dir=instances_dir)

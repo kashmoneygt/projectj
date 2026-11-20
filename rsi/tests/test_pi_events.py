@@ -32,18 +32,33 @@ def test_parse_events(tmp_path: Path) -> None:
         fh.write("not-json\n")
     ev = pi_events.parse_events(events=events)
     assert ev.output_tokens == 100
-    assert ev.cache_read_tokens == 110
-    assert ev.reasoning_tokens == 5
     assert ev.peak_context_tokens == 320
     assert ev.tool_ms == 1234
     assert ev.tool_stats == {"bash": {"count": 1, "errors": 0, "ms": 1234}}
-    assert ev.final_event == "agent_end"
 
 
 def test_parse_events_missing(tmp_path: Path) -> None:
     ev = pi_events.parse_events(events=tmp_path / "nope.jsonl")
     assert ev.output_tokens == 0
     assert ev.tool_ms == 0
+
+
+def test_a_finished_runs_events_drop_the_stream_updates_and_keep_the_rest(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    end = {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "bash", "durationMs": 900}
+    # pi writes compact JSON, which is how the updates are told apart without parsing them
+    lines = [
+        '{"type":"message_start","message":{"role":"assistant"}}',
+        '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Lo"}}',
+        '{"type":"tool_execution_update","toolCallId":"c1","partialResult":"' + "x" * 1000 + '"}',
+        json.dumps(end, separators=(",", ":")),
+    ]
+    events.write_text("".join(f"{line}\n" for line in lines))
+    before = pi_events.parse_events(events=events)
+    pi_events.drop_updates(events=events)
+    assert events.read_text().splitlines() == [lines[0], lines[3]]
+    assert pi_events.parse_events(events=events) == before
+    pi_events.drop_updates(events=tmp_path / "missing.jsonl")
 
 
 def test_a_tool_call_still_running_at_the_end_counts_until_the_run_ended(tmp_path: Path) -> None:
@@ -55,7 +70,7 @@ def test_a_tool_call_still_running_at_the_end_counts_until_the_run_ended(tmp_pat
             {"type": "message_end", "message": {"role": "assistant", "timestamp": 61_000, "usage": {"output": 5}}},
             {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "read"},
             {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read", "durationMs": 40},
-            # asked for at 121 s, the response took 20 s, so its call started at 141 s
+            # this response was requested at 121 s and took 20 s, so the bash call after it started at 141 s
             {
                 "type": "message_end",
                 "message": {"role": "assistant", "timestamp": 121_000, "durationMs": 20_000, "usage": {"output": 5}},
@@ -95,7 +110,8 @@ def test_a_trajectory_shows_the_messages_a_package_added_and_its_edits(tmp_path:
         path=events,
         records=[
             {"type": "message_end", "message": {"role": "user", "content": "Fix it", "timestamp": 1000}},
-            # pi.sendMessage's messages come as messages, and a turn_end or agent_before_settle result's as entries
+            # messages from pi.sendMessage arrive as message_end events, and ones returned by a turn_end or
+            # agent_before_settle handler arrive as entry_appended events
             {"type": "message_end", "message": {"role": "custom", "customType": "nudge", "content": "Run the tests."}},
             {"type": "entry_appended", "entry": {"type": "custom_message", "customType": "review", "content": review}},
             {"type": "entry_appended", "entry": {"type": "context_edit", "targetId": "a", "replacement": None}},
@@ -115,7 +131,7 @@ def test_a_trajectory_shows_the_messages_a_package_added_and_its_edits(tmp_path:
 
 def test_task_metrics_take_the_largest_request_and_add_up_the_timing(tmp_path: Path) -> None:
     model = core.ModelSpec(name="q", source="s", model_id="qwen", ctx=131072)
-    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="", max_calls=0)
     assert (m.system_tokens, m.ttft_first_ms, m.ttft_avg_ms, m.model_ms, m.stop_reason) == (0, 0.0, 0.0, 0, "")
     _write(
         path=tmp_path / "metrics.jsonl",
@@ -126,7 +142,7 @@ def test_task_metrics_take_the_largest_request_and_add_up_the_timing(tmp_path: P
             {"type": "timing", "ts": 4, "ttft_ms": 300, "gen_ms": 1500, "think_ms": 100, "stop_reason": "stop"},
         ],
     )
-    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="")
+    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="", max_calls=0)
     assert (m.system_tokens, m.tool_def_tokens, m.message_tokens) == (100, 300, 400)
     assert (m.ttft_first_ms, m.ttft_avg_ms, m.ttft_max_ms) == (120.0, 210.0, 300.0)
     assert (m.model_ms, m.think_ms, m.stop_reason) == (2400, 500, "stop")
@@ -167,3 +183,40 @@ def test_has_model_output(tmp_path: Path) -> None:
         ],
     )
     assert pi_events.has_model_output(events=events) is True
+
+
+def test_the_final_reply_is_the_text_of_the_last_answer(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    looked = [{"type": "thinking", "thinking": "hm"}, {"type": "text", "text": "Let me look."}, {"type": "toolCall"}]
+    answer = [{"type": "thinking", "thinking": "found it"}, {"type": "text", "text": "It's in a.py."}]
+    looking = {"type": "message_end", "message": {"role": "assistant", "content": looked, "stopReason": "toolUse"}}
+    done = {"type": "message_end", "message": {"role": "assistant", "content": answer, "stopReason": "stop"}}
+    _write(path=events, records=[looking, done])
+    assert pi_events.final_reply(events=events) == "It's in a.py."
+    # a run stopped mid-turn ends on narration like "Let me look.", which isn't an answer
+    result = {"type": "message_end", "message": {"role": "toolResult", "content": "x"}}
+    _write(path=events, records=[done, looking, result])
+    assert pi_events.final_reply(events=events) == ""
+    # the agent could swap events.jsonl for a symlink to any file on the host, so final_reply ignores symlinks
+    _write(path=events, records=[done])
+    (tmp_path / "linked.jsonl").symlink_to(events)
+    assert pi_events.final_reply(events=tmp_path / "linked.jsonl") == ""
+    assert pi_events.final_reply(events=tmp_path / "missing.jsonl") == ""
+
+
+def test_a_run_stopped_at_its_call_budget_says_so_and_one_past_it_breaks_the_contract(tmp_path: Path) -> None:
+    model = core.ModelSpec(name="m", source="s", model_id="m")
+    _write(path=tmp_path / "metrics.jsonl", records=[{"type": "timing", "stop_reason": "toolUse"}])
+    chat = {"method": "POST", "path": "/v1/chat/completions", "params": {"model": "m"}}
+    _write(path=tmp_path / "requests.jsonl", records=[chat] * 101)
+    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="", max_calls=100)
+    assert m.stop_reason == "toolUse" and m.contract_violations == []
+    _write(
+        path=tmp_path / "metrics.jsonl",
+        records=[{"type": "timing", "stop_reason": "aborted"}, {"type": "budget", "calls": 100}],
+    )
+    # compaction calls the model without going through budget.ts, so allow a few requests over the budget
+    _write(path=tmp_path / "requests.jsonl", records=[chat] * (100 + pi_events.BUDGET_SLACK + 1))
+    m = pi_events.task_metrics(instance_dir=tmp_path, model=model, seconds=10.0, patch="", max_calls=100)
+    assert m.stop_reason == pi_events.CALL_BUDGET
+    assert m.contract_violations == ["106 model requests, over the budget of 100"]

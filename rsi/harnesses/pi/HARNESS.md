@@ -7,20 +7,30 @@ compaction and retries.
 
 ## How the agent runs
 
-Every run is `pi --print -e /opt/harness --mode json` in a container that starts in the repo, with your package at
-`/opt/harness`. The agent gets one message, the task as a person would ask for it, and pi adds nothing to it. Nobody
-answers the agent's questions. The run ends when the agent stops calling tools, and there's no turn limit. A run that
-goes on too long is stopped. What the agent leaves in the repo, new files included, is the run's diff.
+Every run is `pi --print -e /opt/harness --mode json` in the task's own container, started in its working folder,
+with your package at `/opt/harness`. Tasks come from all kinds of work: a project with an issue to resolve or a
+question about its code, a machine with a service or build to fix, data to analyze. So the folder may or may not be a
+git repo or have tests, the code can be in any language, and some tasks have the internet while others don't. pi runs
+on its own copy of node, which is last on the task's `PATH`, so `node` there may be the task's own.
+
+The agent gets one message, the task as a person would ask for it, and pi adds nothing to it. Nobody answers the
+agent's questions. The run ends when the agent stops calling tools, or once it has made 100 model requests, like a
+user who stops waiting (the model isn't told). A run that goes on too long is stopped too, along with everything it
+started. Then the task is judged on what the agent left behind: its files, anything it left running, and its last
+message, which is its answer when the task asks a question. When git is in the container, what the agent changed in
+its working folder, new files included, is the run's diff.
 
 ## What a run leaves
 
-Each task's folder under `/work/runs/` holds two files from its run:
+Each task's folder under `/work/runs/` is named after the task's kind of work plus a short hash, so the same task has
+the same folder name in every run. It holds two files from the run:
 
 - `session.jsonl` - pi's own record of the session, one JSON object per line: the system prompt pi built, the task
   message, each response with its thinking and tool calls, each tool result, and each record a package made with
   `appendEntry`. pi's `packages/coding-agent/docs/session-format.md` describes it
-- `metrics.jsonl` - what the metrics extension saw: the system prompt and tools as they were sent (`"type": "context"`),
-  the size of each request, and each response's timing (`"type": "timing"`)
+- `metrics.jsonl` - what the metrics extension saw in the agent's own pi (not in a second pi an extension starts): the
+  system prompt and tools as they were sent (`"type": "context"`), the size of each request, and each response's
+  timing (`"type": "timing"`)
 
 ## What a package can hold
 
@@ -33,7 +43,7 @@ Each task's folder under `/work/runs/` holds two files from its run:
   model reads the rest when it decides to
 - `settings.json` - pi's settings about how the agent works, like which built-in tools are on, compaction and
   retries
-- `mcp.json` - MCP servers. The container has no network, so a server has to run inside it
+- `mcp.json` - MCP servers. Some tasks have no network, so a server has to run inside the container
 - `scripts/` - files the agent can run. The package can be installed anywhere, so an extension finds them from its
   own path (`import.meta.url`), and a skill keeps its files in its own folder and names them relative to `SKILL.md`
 - `agents/*.md` - copied to `agents/` in pi's agent dir. pi doesn't read them itself, but an extension can,
@@ -59,7 +69,8 @@ sees it.
 - when the run ends - `agent_before_settle` can add a message and ask for one more turn, and `turn_end` runs after
   each turn
 - know-how for when it needs it - skills, which only help when the model reads them
-- work in a fresh context - a second `pi` process that an extension starts
+- work in a fresh context - a second `pi` process that an extension starts. Start it with `process.execPath` and
+  `process.argv[1]`, since the `node` on the task's `PATH` may be the task's own
 
 `packages/coding-agent/examples/extensions/` has working examples of most of these, like `tool-override.ts`,
 `truncated-tool.ts`, `permission-gate.ts`, `custom-compaction.ts` and `subagent/`.
@@ -72,7 +83,7 @@ Every change has a cost. Text the model gets on every request is paid for on eve
 messages makes the model server work through them again, since it reuses the unchanged start of the last request.
 There's one model server, so a second `pi` process waits its turn and adds time. A call to the model from an
 extension or a second process goes through the same server with the same settings, and counts toward a run's cost
-like the agent's own.
+and its 100 requests like the agent's own.
 
 Whenever your change kicks in (it blocks or rewrites a tool call, adds a message, asks for one more turn), record it
 with `pi.appendEntry("acted", { what: "<what your change did, in a few words>" })`. The model never sees it. Text
@@ -102,9 +113,9 @@ These stay as they are. Every request to the model is audited where it leaves th
   `registerProvider`, `registerVirtualModel`, `setModel` or `setThinkingLevel`, and `settings.json` only takes
   settings about how the agent works, not its thinking level or a thinking budget (`check-variant` names any key it
   won't take)
-- how runs are measured: a metrics extension that reads each request and never changes it, and its `RSI_*`
-  environment variables
-- the task message, the container and the repo it starts from
+- how runs are measured and stopped: a metrics extension that reads each request and never changes it, an extension
+  that ends the run at its request budget, and their `RSI_*` environment variables
+- the task message, the container and the folder it starts in
 
 ## Checking a package
 
@@ -121,15 +132,15 @@ The same checks run when you hand a variant in, and a variant that fails them is
 
 ## Trying a package
 
-`try-variant <dir> <repo> <task file>` runs a package the way a task run does, against the agent's own model: pi starts
-in a copy of the repo with the package staged, and the agent gets the task file's text as its one message, so write it
-the way a person would ask for the work. It prints each model response's tool calls, every message the package added
-and every `acted` record, how the run ended and what the run changed, and keeps the run's record under `/out/tries`.
-Build a small repo yourself in `/tmp` that sets up the problem your change is for, or the kind of work you want to watch
-(pytest and node are installed). A run takes minutes, like a real task, and is stopped after 540 seconds unless you pass
-`--timeout`. Run a few to see that your change fires when it should and stays quiet when it shouldn't. A background job
-dies when its tool call ends. To run tries side by side, start them in one call and `wait`, or use `setsid`. Stop any
-server a try leaves running.
+`try-variant <dir> <repo> <task file>` runs a package much like a task run, against the agent's own model but without
+the request budget. pi starts in a copy of the repo with the package staged, and the agent gets the task file's text
+as its one message, so write it the way a person would ask for the work. It prints each model response's tool calls,
+every message the package added and every `acted` record, how the run ended and what the run changed, and keeps the
+run's record under `/out/tries`. Build a small repo yourself in `/tmp` that sets up the problem your change is for, or
+the kind of work you want to watch (pytest and node are installed). A run takes minutes, like a real task, and is
+stopped after 540 seconds unless you pass `--timeout`. Run a few to see that your change fires when it should and
+stays quiet when it shouldn't. A background job dies when its tool call ends, so to run tries side by side, start them
+in one call and `wait`, or use `setsid`. Stop any server a try leaves running.
 
 `try-variant --question <dir>` asks the agent a question about a small JavaScript repo, one that needs no change.
 When you hand a variant in, it's asked this question and one like it about a Python repo. It's rejected if, on two

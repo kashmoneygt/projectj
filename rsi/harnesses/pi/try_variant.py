@@ -16,19 +16,19 @@ import check_variant
 
 MODELS = Path("/opt/rsi/models")
 TRIES = Path("/out/tries")
-QUESTION = Path("/opt/rsi/question")  # a question about a small repo that needs no change
+QUESTION = Path("/opt/rsi/question")  # a small repo and a question about it that needs no change
 MODEL_REF = (MODELS / "ref.txt").read_text().strip() if (MODELS / "ref.txt").is_file() else ""
 SHOWN = 160
-# pi's streaming updates, skipped unread since a run writes thousands of them
+# skip pi's streaming updates without parsing them, since a run writes thousands
 _UPDATES = ('{"type":"message_update"', '{"type":"tool_execution_update"')
-# git with the repo's hooks, fsmonitor, external diff and textconv off, as in a task run
+# git with the repo's hooks and fsmonitor off, since the agent could set them (a task run does the same)
 GIT = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 
 
 @dataclasses.dataclass(frozen=True)
 class Tried:
     events: Path
-    repo: Path  # the copy the agent worked in
+    repo: Path  # copy of the repo the agent worked in
     diff: str
     finished: bool  # pi ended on its own, before the timeout
 
@@ -38,7 +38,7 @@ def stage(package: Path, repo: Path, copy: Path, work: Path) -> tuple[str, Path,
     shutil.copytree(repo, copy, symlinks=True)
     if not (copy / ".git").exists():
         subprocess.run(["git", "init", "-q"], cwd=copy, check=True)
-    # keep Python caches out of the diff, as real repos do
+    # keep Python caches out of the diff, since real repos usually gitignore them
     (copy / ".git" / "info").mkdir(parents=True, exist_ok=True)
     with open(copy / ".git" / "info" / "exclude", "a") as exclude:
         exclude.write("\n__pycache__/\n*.pyc\n")
@@ -54,7 +54,7 @@ def stage(package: Path, repo: Path, copy: Path, work: Path) -> tuple[str, Path,
 
 
 def collected_diff(repo: Path, start: str) -> str:
-    """Every change since start, collected like a task run does"""
+    """Diff of every change since start, new files included, taken the same way as in a task run"""
     staged = subprocess.run([*GIT, "add", "-A"], cwd=repo, check=False).returncode == 0
     diff = [*GIT, "diff", *(["--cached"] if staged else []), "--binary", "--no-ext-diff", "--no-textconv", start]
     return subprocess.run(diff, cwd=repo, capture_output=True, text=True, check=False).stdout
@@ -114,14 +114,14 @@ def summary(events: Path) -> list[str]:
 
 
 def _added(message: dict) -> str:
-    """A message the package added for the model, with pi.sendMessage or in a turn_end or agent_before_settle result"""
+    """A message the package added for the model, via pi.sendMessage or a turn_end or agent_before_settle result"""
     content = message.get("content")
     text = content if isinstance(content, str) else " ".join(str(p.get("text") or "") for p in _parts(message=message))
     return f"    harness message ({message.get('customType')}): {text[:400]}"
 
 
 def answers(events: Path) -> list[bool]:
-    """For each model response, whether it was an answer (it ended on its own, with text and no tool call)"""
+    """For each model response, whether it was an answer, i.e. it stopped on its own with text and no tool call"""
     found: list[bool] = []
     for message in _responses(events=events):
         parts = _parts(message=message)
@@ -132,7 +132,7 @@ def answers(events: Path) -> list[bool]:
 
 
 def unavailable(events: Path) -> str:
-    """Why a run says nothing about the package (no response, or the last request failed), or "" """
+    """Why the run can't judge the package (no response, or the last request failed), or "" if it can"""
     responses = _responses(events=events)
     if not responses:
         return "pi got no response from the model"
@@ -142,7 +142,7 @@ def unavailable(events: Path) -> str:
 
 
 def model_answers() -> bool:
-    """Whether the model answers a plain one-token request, sent where pi sends its own"""
+    """Check if the model answers a plain 1-token request, sent to the same endpoint pi uses"""
     try:
         provider = json.loads((MODELS / "models.json").read_text())["providers"]["local"]
         body = {"model": provider["models"][0]["id"], "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1}
@@ -158,15 +158,15 @@ def model_answers() -> bool:
 
 
 def question_problems(tried: Tried, timeout: int, failed: str = "") -> list[str]:
-    """How the package got in the way of a question that needed no change"""
+    """Problems the package caused on a question that needed no change"""
     found = answers(events=tried.events)
     problems: list[str] = []
     if True not in found:
         never = "the agent never answered" + ("" if tried.finished else f" in {timeout} s")
-        # failed says why pi's requests got no answer while a plain request did
+        # failed is why pi's requests went unanswered even though a plain request worked
         problems.append(f"{failed}, though the model answers a plain request" if failed else never)
     elif found.index(True) < len(found) - 1:
-        # in a one-shot run only an extension can make the agent go on
+        # in a one-shot pi run, only an extension can make the agent keep going after it answers
         problems.append("the agent answered, and the package made it go on")
     elif not tried.finished:
         problems.append(f"the agent answered, but the run hadn't ended {timeout} s in")
@@ -177,7 +177,7 @@ def question_problems(tried: Tried, timeout: int, failed: str = "") -> list[str]
 
 
 def run(package: Path, repo: Path, message: str, timeout: int) -> Tried:
-    """Run the package on a copy of repo, the way a task run does"""
+    """Run pi with the package on a copy of repo, like a task run"""
     TRIES.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="try-", dir=TRIES))
     copy = Path(tempfile.mkdtemp(prefix="try-repo-", dir="/tmp")) / "repo"
@@ -188,7 +188,7 @@ def run(package: Path, repo: Path, message: str, timeout: int) -> Tried:
     env = {**os.environ, "PI_CODING_AGENT_DIR": str(agent)}
     finished = True
     with open(events, "w") as out, open(work / "pi.err", "w") as err:
-        # in a process group of its own, so stopping it also stops what it started, like a second pi
+        # start pi in its own process group, so stopping it also stops anything it started, e.g. a second pi
         proc = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=out, stderr=err, cwd=copy, env=env, text=True, start_new_session=True
         )
@@ -206,10 +206,10 @@ def run(package: Path, repo: Path, message: str, timeout: int) -> Tried:
 def stop(proc: subprocess.Popen) -> None:
     """Stop pi and everything it started"""
     if proc.poll() is None:
-        # pi stops the bash commands it started, each in a group of its own, when it gets SIGTERM
+        # SIGTERM first so pi stops its bash commands itself, since each one runs in its own process group
         _signal_group(pid=proc.pid, sig=signal.SIGTERM)
         try:
-            # short, since the bash tool's timeout kills try-variant 5 s after its SIGTERM
+            # keep this short, since the bash tool's timeout kills try-variant 5 s after sending SIGTERM
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
@@ -233,9 +233,9 @@ def show(tried: Tried, timeout: int) -> None:
 
 
 def question(package: Path, timeout: int, tries: int) -> int:
-    """Ask until the outcome is clear (exit 1 on a problem, 2 if the model couldn't be asked enough)"""
-    # The model can cause any of these problems by chance, like a stray file that a package's hook then rightly acts
-    # on. So a problem has to show up on two tries the model answered, or on the one try there is.
+    """Ask until the outcome is clear, and exit 1 on a problem or 2 if the model couldn't be asked enough times"""
+    # the model can cause any of these problems by chance, e.g. it leaves a stray file that a package's hook then
+    # rightly acts on. So only report a problem seen on 2 tries the model answered, or on the only try if tries is 1
     message = (QUESTION / "question.md").read_text().strip()
     needed = min(2, tries)
     with_problems = 0
@@ -289,7 +289,7 @@ def main(argv: list[str]) -> int:
         "--timeout", type=int, default=540, help="seconds before the run is stopped (the bash tool stops at 600)"
     )
     args = parser.parse_args(argv[1:])
-    # the bash tool's timeout sends SIGTERM, which then stops pi too, like ctrl-c does
+    # handle SIGTERM (sent by the bash tool's timeout) like ctrl-c, so pi gets stopped too
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, signal.default_int_handler)
     if args.question:

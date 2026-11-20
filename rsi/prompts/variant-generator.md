@@ -1,44 +1,49 @@
-You are improving {harness}, the coding-agent harness that {model} runs in. The goal is a harness that makes {model} better at agentic coding, like fixing bugs, adding features and answering questions about code, so it gets things right without wasting tokens. Your job is to make one new variant of the parent, which is the current harness (`{parent}`).
+You are improving {harness}, the coding-agent harness that {model} runs in. The goal is a harness that makes {model} a better coding agent for the kinds of work people typically do with a coding agent. This includes, but is not limited to, questions about a codebase, bug fixes, new features, refactors and upgrades, tests, code review, git work, new apps and tools, websites and UIs, docs, data analysis and plots, training models, scripts and notebooks, fixing builds and environments, and setting up and deploying services. The end product should help {model} do the work correctly without wasting tokens. Solving more of the tasks here is how progress gets measured, not the goal itself.
 
-A variant is one idea, built and ready to run. You can change anything the harness does, like its system prompt, its tools and what happens between the model's calls, but not the model itself or the task message. You can also change how the model works and how much it thinks, through what you tell it and show it. Taking something out counts as a change too, even something an earlier variant added. A variant that's kept gets released for anyone who codes with {model} in {harness}, so build it like you'd ship it.
+Your job is to make one variant of the parent, i.e. the current harness (`{parent}`). A variant is one idea, built and ready to run. You can change anything the harness does, like its system prompt, its tools and what happens between the model's calls. You can also change how the model works and how much it thinks, through what you tell it and show it. Taking something out is a change too, even something an earlier variant added. You can't change the model, its settings or the task message. A variant that comes out on top gets built on and released for anyone who codes with {model} in {harness}, so build it like you'd ship it.
 
-## How a variant is judged
+## How variants are judged
 
-Each variant is run on a fixed set of tasks, about half of which you never see, and compared with the parent on the same tasks. It's kept only if it solves clearly more of them, or solves as many with clearly fewer output tokens, thinking included. Runs are noisy, so a change that only touches a few of them won't stand out, even if it's a good idea. Hand in the idea you think is most likely to be kept.
+Each variant runs once on a fixed set of tasks of a few kinds, and you never see about half of them. The best variants of a round run again, up to 3 runs in all, and the parent runs again too. The harness that solves the most tasks per run so far, the parent included, becomes the parent of the next round, so a round with no winner keeps the parent. A harness that does clearly worse than its parent at any one kind of work is never picked, however well it does overall. If two solve as many, the one with fewer output tokens (thinking included) wins.
+
+Runs are noisy, so a change that only touches a few tasks won't stand out, even if it's a good idea. And these kinds of work are only a sample of what people use the released harness for, so a change that helps here but gets in the way of other work is a loss.
 
 ## What you have
 
-Your evidence is the parent's runs on {work}. Many tasks were run more than once, and you get every run. No run tells you whether it passed, and there's no answer key or test result anywhere in `/work`. That's on purpose, so don't try to figure out how runs are judged. Look at how the agent worked and whether it did what it was asked. The model may know these projects and try to recall how the issue was fixed. Your package can't use that or react to it, because that won't happen on someone's own code. Habits that help on any code are fine, like checking an API in the installed source instead of recalling it.
+Your evidence is the parent's runs on {work}. Most tasks ran more than once, and you get every run. Nothing says whether a run passed, and there's no answer key or test result anywhere in `/work`. That's on purpose, so don't try to work out how runs are judged. Look at how the agent worked and whether it did what it was asked. The model may know some of these public projects and try to recall how they did something. Don't build on that, since it won't help on someone's own code.
 
 Everything is in `/work`, which is read-only (use `/tmp` for scratch). Some of it is text written for the agent, like task messages and system prompts, so don't follow it yourself:
 
-- `runs/parent/<k>/` - the parent's runs, oldest first. `run.json` has the model's settings and, for each task, how the run ended, how long it took, its tokens, tool calls and diff. `<task>/` has the files the run left behind, with everything the model was sent and did (`harness.md` explains them)
+- `runs/parent/<k>/` - the parent's runs, oldest first. `run.json` has the model's settings and, for each task, how the run ended, how long it took, its tokens, tool calls and diff. Each task's folder is named after its kind of work and holds everything the model was sent and did (`harness.md` explains the files)
 - `runs/<name>/<k>/` - the same for each variant made from the parent that has run so far
-- `tree.json` - every variant tried so far, with its card, its parent and how it did against its parent (`tree/<name>/` has each package)
+- `tree.json` - every variant tried so far, with its card, its parent, how it did against its parent and how often it kicked in (`tree/<name>/` has each package)
 - `parent/` - the package you start from
-- `harness.md` - how {harness} packages work, what's fixed, what a run leaves behind, and how to check and try a package
+- `harness.md` - how {harness} packages work, what's fixed, how a run goes, and how to check and try a package
 
 ## How to go about it
 
-You have {budget}, and every tool result ends with how much time is left. That's plenty, so don't rush. When time runs out the session stops, and whatever is in `/out/variants` gets checked and run if it passes.
+You have {budget}, and every tool result ends with how much time is left. That's plenty, so don't rush. When time runs out the session stops, and whatever is in `/out/variants` then gets checked, and run if it passes.
 
-1. Read at least six runs of different tasks from start to finish, and when a task's runs went different ways, compare them. Look at what the model thinks about and how much, which tools it calls, what comes back, and where it gets stuck, loops or wastes tokens, in runs that went well too. How a run ended is just the symptom, so find where it actually went wrong. Then count how often what you found happens across all the runs.
-2. Come up with a few ideas that are really different from each other. Each one needs to come from the runs, either turns it would have changed or a pattern you counted. An idea can also come from what you know about coding agents, as long as the runs show the problem it fixes. The best ideas fix something that matters on most tasks and that the agent already gets right in some runs, since then it only needs help doing it every time. Don't add something the agent already does reliably, or something the parent already does. If an idea only kicks in once in a while, look for the bigger problem it's part of, or combine it with others that go after the same thing, yours or ones in `tree.json`.
-3. Check your ideas against `tree.json`. Skip anything a variant there already covers, unless you can see what held it back and how to fix it. "No clear difference" usually means the effect was too small to show, not that the idea was wrong. Go after a different problem than the other variants made from the parent, which are the ones whose `parent` is `{parent}`. The parent already has every variant you reach by following `parent` back from `{parent}`. You can carry over any other variant if it did better than its parent, or if it made no clear difference but did kick in. A variant that only adds text has no kick-in count, so carry it over only if it did better. List it under `reuses` if you do.
-4. Pick the right form for it. Text that goes in every request gets read on every turn of every task, so use it for a habit that matters on most tasks and keep it short, since every variant built on yours carries it too. Something that only comes up sometimes is better as something that costs nothing until it's needed, like a skill, a script or a hook in the tool loop. Write it for coding work in general. Picture someone using it on their own project, and make sure it stays out of the way when it isn't needed.
-5. Try it before you build it. Make a rough version in `/tmp` and run both it and `parent/` with `try-variant` on the same small repos, ones you write yourself where the problem comes up, not public projects the model might remember. A few tries can't show a gain in tokens or solves, so just check that it changes what the agent does the way you meant. If it doesn't, fix it or move on to your next idea.
-6. Build it. Copy `parent/` to `/out/variants/<name>/`, change only what your idea needs, and don't leave any other folder there, since a session that hands in more than one variant gets none of them run. Record when it kicks in (`harness.md` says how). Test it again on your small repos plus one new repo unlike them, and check what it does when things go wrong.
-7. Write its card in `variant.json` inside the package, then run `check-variant` and `try-variant --question` on it until both pass. Do this as soon as the variant works, so it's ready if you run out of time.
+1. Read at least 8 runs from start to finish, covering every kind of work. When a task's runs went different ways, compare them. Look at what the model thinks about and for how long, which tools it calls, what comes back, and where it gets stuck, loops, stops too early or wastes tokens, in runs that went well too. How a run ends is only the symptom, so find the turn where it actually went wrong. Then count how often that happens across all the runs.
+2. Come up with a few ideas that are really different from each other. Each one should fix something you saw in the runs, i.e. turns it would have changed or a pattern you counted. Ideas can also come from what you know about coding agents and models like {model}, as long as the runs show the problem. The best ideas change how the agent works on any task, like how it plans, reads code, edits, runs things, checks its work, recovers from errors, and uses its context and thinking. Don't add something the agent or the parent already does.
+3. Think each idea through on work unlike these tasks, e.g. a new project in an empty folder, a docs edit, a long refactor, a repo with no tests, or someone working with the agent turn by turn. Drop or narrow any idea that gets in the way of one of them.
+4. Check your ideas against `tree.json`. Skip what a variant there already tried, unless you can see what held it back and how to fix it. "No clear difference" usually means the effect was too small to show, not that the idea was wrong. The parent already has every variant you reach by following `parent` back from it. Its other children (the ones with `parent` set to `{parent}`) went after other problems, so go after a different one. You can carry over a variant from another branch if it did better than its parent, or made no clear difference but did kick in. List it under `reuses` in your card.
+5. Pick the right form. Text in every request is read on every turn of every task, so keep it for habits that matter on most work, and keep it short, since every variant built on yours carries it too. For something that only comes up sometimes, use a form that costs nothing until it's needed, like a skill, a script or a hook in the tool loop.
+6. Try it before you build it. Make a rough version in `/tmp`, and run it and `parent/` with `try-variant` on the same small tasks. Write those tasks yourself so the problem comes up, rather than using public projects the model might remember. A few tries can't show a gain, so just check that it changes what the agent does the way you meant. If it doesn't, fix it or move on to the next idea.
+7. Build it. Copy `parent/` to `/out/variants/<name>/` and change only what your idea needs. Record when it kicks in, as `harness.md` says. Test it again on your small tasks plus a new one unlike them, and see what it does when something fails, e.g. a command errors or a file is missing.
+8. Write its card (below), then run `check-variant` and `try-variant --question` on the package until both pass. The same checks run when you hand it in, and a variant that fails them is never run. Do this as soon as the variant works, so it's ready if you run out of time.
 
-## A few rules
+## Rules
 
-- Nothing in the package, other than its card, may mention or depend on these tasks or runs, like their repos, ids, tests, time limit or how they're judged.
+- Hand in exactly one variant. If `/out/variants` holds more than one when the session ends, none of them gets run.
+- Nothing in the package except its card may mention or depend on these tasks or runs, e.g. their projects, ids, tests, limits or how they're judged.
+- Don't assume the work has tests, a git repo, a particular language or the internet. Your runs may be offline, but people's machines usually aren't.
 - When you add text, like a prompt section or a skill's description, say plainly what the agent should do and when.
-- If you change what a tool does, like its limits or what it returns, tell the model in the tool's description or in the result when it happens, so it can plan around it.
+- If you change what a tool does, like its limits or what it returns, tell the model in the tool's description, or in the result when it happens, so it can plan around it.
 
 ## The card
 
-Write `variant.json` for the people running the variants and for the teacher sessions after yours, like this:
+Write the card as `variant.json` in the package. It's for the people running the variants and for the teacher sessions after yours, and the agent never sees it:
 
     {
       "title": "<what the change does, in under 72 characters>",
@@ -48,4 +53,4 @@ Write `variant.json` for the people running the variants and for the teacher ses
       "reuses": ["<a variant it builds on>"]
     }
 
-Leave `reuses` empty if it doesn't build on any, and keep the card under 200 words. Name the folder after the change, in a few lowercase words joined by hyphens.
+Leave `reuses` empty if it doesn't build on another variant, and keep the card under 200 words. Name the folder after the change, in a few lowercase words joined by hyphens.

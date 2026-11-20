@@ -7,14 +7,14 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol
 
-# forwards a task's model requests as is and logs each one, since it's the task's only way out
-# runs on its own in the pi image, so stick to python 3.11
+# forward model requests unchanged and log each one, since this is the only way out of the sandbox network
+# runs by itself in the pi image, so stick to python 3.11 and its standard library
 
-# request lines leave out the conversation, and log longer parameters by their size
+# leave messages and tool definitions out of request lines, and log long params by their size only
 LEFT_OUT = ("messages", "tools", "functions")
 LONGEST = 1000
-# Docker Desktop's way to the host now and then leaves a new connection hanging for half a minute or more,
-# while a new socket gets through at once. Each try waits a bit longer than the one before
+# Docker Desktop's route to the host sometimes leaves a new connection hanging for 30+ s, while a retry on a new
+# socket gets through at once. So retry, waiting a bit longer each time
 CONNECT_TRIES = 5
 CONNECT_WAIT_S = 2.0
 
@@ -45,7 +45,7 @@ def request(method: str, path: str, body: bytes) -> dict:
 
 
 def usage(raw: bytes, log: Log) -> bool:
-    """Log the usage a response body or stream event reports, and say whether it had one"""
+    """Log the token usage a response body or stream event reports, and return whether it had any"""
     if b'"usage"' not in raw:
         return False
     try:
@@ -76,7 +76,7 @@ async def head(stream: asyncio.StreamReader) -> tuple[list[str], dict[str, str]]
 
 
 async def body(stream: asyncio.StreamReader, headers: dict[str, str]) -> AsyncIterator[bytes]:
-    """The body as it arrives: chunked, by length, or until the connection ends"""
+    """Yield the body as it arrives, whether it's chunked, sized by content-length, or runs until the connection ends"""
     if "chunked" in headers.get("transfer-encoding", "").lower():
         while size := int((await stream.readuntil(b"\r\n")).split(b";")[0], 16):
             yield await stream.readexactly(size)
@@ -95,7 +95,7 @@ async def read_requests(stream: asyncio.StreamReader, methods: collections.deque
         (method, path, _), headers = message
         methods.append(method)
         if "chunked" in headers.get("transfer-encoding", "").lower():
-            # the next request starts somewhere in chunks we don't read
+            # stop, since we don't parse chunked request bodies and so can't tell where the next request starts
             log(entry={"method": method, "path": path, "unread": "chunked body"})
             return
         sent = await stream.readexactly(int(headers.get("content-length", 0)))
@@ -106,7 +106,7 @@ async def read_responses(stream: asyncio.StreamReader, methods: collections.dequ
     while (message := await head(stream=stream)) is not None:
         (_, status, *_), headers = message
         if status == "101":
-            return  # the connection leaves HTTP
+            return  # switching protocols, so the rest isn't HTTP
         if status.startswith("1"):
             continue  # an interim response, before the real one
         method = methods.popleft() if methods else ""
@@ -126,14 +126,14 @@ async def read_responses(stream: asyncio.StreamReader, methods: collections.dequ
                             chunks += 1
             reported |= usage(raw=rest.removeprefix(b"data:"), log=log)
         finally:
-            # if a stream ends before the server reports usage (the harness cut the response or the task ran out
-            # of time), its tokens still count. The servers send about one token per chunk
+            # if a stream ends before the server reports usage (e.g. the harness cut the response or the task timed
+            # out), still count its tokens from the number of chunks, since the servers send about one token per chunk
             if chunks and not reported:
                 log(entry={"usage": {"completion_tokens": chunks}, "from": "stream chunks"})
 
 
 class Tap:
-    """Reads a copy of one direction of a connection without holding up its bytes"""
+    """Reads a copy of the bytes going one way on a connection, without holding them up"""
 
     def __init__(self, read: Read, methods: collections.deque[str], log: Log) -> None:
         self.stream: asyncio.StreamReader | None = asyncio.StreamReader()
@@ -189,7 +189,7 @@ async def connect(host: str, port: int, log: Log) -> tuple[asyncio.StreamReader,
 
 def logger(path: str, ip: str) -> Log:
     def log(entry: dict) -> None:
-        # reopened per line, so a moved or deleted log starts again
+        # reopen the file for each line, so a moved or deleted log gets created again
         with open(path, "a") as fh:
             fh.write(json.dumps({"time": round(time.time(), 3), "ip": ip, **entry}) + "\n")
 
@@ -198,7 +198,7 @@ def logger(path: str, ip: str) -> Log:
 
 @dataclasses.dataclass(frozen=True)
 class Upstream:
-    """The model server, and the log of what each container sent it"""
+    """The model server to forward to, and where to log what each container sends it"""
 
     host: str
     port: int
@@ -208,7 +208,7 @@ class Upstream:
         log = logger(path=self.log_path, ip=writer.get_extra_info("peername")[0])
         try:
             upstream_reader, upstream_writer = await connect(host=self.host, port=self.port, log=log)
-        except OSError:  # TimeoutError is one too
+        except OSError:  # TimeoutError is an OSError too
             writer.close()
             return
         methods: collections.deque[str] = collections.deque()
@@ -228,5 +228,5 @@ async def serve(upstream: Upstream) -> None:
 
 if __name__ == "__main__":
     host, port, log_path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-    open(log_path, "a").close()  # there from the start, so a run can tell this forwarder from one that logs nothing
+    open(log_path, "a").close()  # create the log now, so a run can tell this forwarder from one that logs nothing
     asyncio.run(serve(upstream=Upstream(host=host, port=port, log_path=log_path)))

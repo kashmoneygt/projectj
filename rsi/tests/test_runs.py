@@ -69,12 +69,12 @@ def test_history_reads_an_archive_and_says_which_records_it_cant(
     (tmp_path / "runs" / "gold").mkdir()
     (tmp_path / "runs" / "older").mkdir()
     older = json.loads((tmp_path / "runs" / "t-node" / "node.json").read_text())
-    older["model"]["thinking"] = "medium"  # how records said it before thinking was on or off
+    older["model"]["thinking"] = "medium"  # old records stored a level here, before thinking was just on or off
     (tmp_path / "runs" / "older" / "node.json").write_text(json.dumps(older))
     nodes, unread = runs.history_in(folder=tmp_path / "runs")
     assert ([n.name for n in nodes], unread) == (["t-node"], ["older"])
     assert runs.history_in(folder=tmp_path / "missing") == ([], [])
-    # the live runs folder is read strictly, so a record it can't read isn't skipped quietly
+    # list_nodes reads the live runs folder strictly, so a bad record raises instead of being skipped
     with pytest.raises(pydantic.ValidationError):
         runs.list_nodes()
 
@@ -91,15 +91,35 @@ def _repos(node: core.Node) -> dict[str, str]:
     return {iid: iid.split("-")[0] for iid in node.runs}
 
 
-def test_probe_is_the_failures_plus_sampled_successes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_probe_takes_as_many_solved_as_unsolved_tasks_of_each_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
-    monkeypatch.setattr(runs, "PROBE_SUCCESSES", 2)
-    root = _scored(name="root", outcomes={"a__b-1": False, "b__c-2": True, "c__d-3": True, "d__e-4": True})
-    probe = runs.write_probe(root=root, nodes=[root], repos=_repos(node=root))
-    assert probe[0] == "a__b-1" and len(probe) == 3
-    assert set(probe[1:]) <= {"b__c-2", "c__d-3", "d__e-4"}
+    monkeypatch.setattr(runs, "PROBE_TASKS", 4)
+    outcomes = {"fix-1": False, "fix-2": True, "fix-3": True, "build-1": False, "build-2": False, "build-3": True}
+    root = _scored(name="root", outcomes=outcomes)
+    # an errored run says nothing about its task, so the probe skips it
+    root.runs["fix-4"] = core.TaskRun(instance_id="fix-4", status="error")
+    kinds = {iid: "fixes" if iid.startswith("fix") else "builds" for iid in root.runs}
+    probe = runs.write_probe(root=root, nodes=[root], repos=_repos(node=root), kinds=kinds)
+    assert len(probe) == 4 and "fix-4" not in probe
+    for kind in ("fixes", "builds"):
+        mine = [iid for iid in probe if kinds[iid] == kind]
+        assert sorted(root.runs[iid].resolved for iid in mine) == [False, True]
+    hidden = runs.lineage_hidden(root=root)
+    assert len(hidden) == 2 and {kinds[iid] for iid in hidden} == {"fixes", "builds"}
     assert runs.lineage_probe(root=root) == probe
-    assert runs.write_probe(root=root, nodes=[root], repos=_repos(node=root)) == probe
+    assert runs.write_probe(root=root, nodes=[root], repos=_repos(node=root), kinds=kinds) == probe
+
+
+def test_a_kind_short_of_unsolved_tasks_fills_its_share_with_solved_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    monkeypatch.setattr(runs, "PROBE_TASKS", 4)
+    root = _scored(name="root", outcomes={"a-1": False, "b-2": True, "c-3": True, "d-4": True, "e-5": True})
+    probe = runs.write_probe(root=root, nodes=[root], repos=_repos(node=root), kinds={})
+    assert probe[0] == "a-1" and len(probe) == 4
 
 
 def test_probe_leaves_out_tasks_the_model_never_solves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,7 +131,7 @@ def test_probe_leaves_out_tasks_the_model_never_solves(tmp_path: Path, monkeypat
     unscored.total = 0
     nodes = [root, *history, unscored]
     assert runs.never_solved(model="gemma-4-12b", dataset="swebench-verified", nodes=nodes) == {"hard-1"}
-    assert runs.write_probe(root=root, nodes=nodes, repos=_repos(node=root)) == ["flip-2", "easy-3"]
+    assert runs.write_probe(root=root, nodes=nodes, repos=_repos(node=root), kinds={}) == ["flip-2", "easy-3"]
     text = (paths.node_dir(name="root") / "probe.txt").read_text()
     assert text.startswith("# probe set of the lineage rooted at root: 2 tasks (seed 1)\n")
     assert "never solved: hard-1\n" in text
@@ -144,18 +164,18 @@ def test_the_probe_hides_half_its_failures_and_half_its_successes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
-    monkeypatch.setattr(runs, "PROBE_SUCCESSES", 4)
+    monkeypatch.setattr(runs, "PROBE_TASKS", 8)
     passed = [f"pass-{i}" for i in range(6)]
     root = _scored(name="root", outcomes={f"fail-{i}": False for i in range(5)} | dict.fromkeys(passed, True))
     assert runs.lineage_hidden(root=root) == set()
-    probe = runs.write_probe(root=root, nodes=[root], repos=_repos(node=root))
-    assert probe[5:] == benchmarks.spread(ids=passed, repos=_repos(node=root), count=4, seed=root.seed)
+    probe = runs.write_probe(root=root, nodes=[root], repos=_repos(node=root), kinds={})
+    assert probe[4:] == benchmarks.spread(ids=passed, repos=_repos(node=root), count=4, seed=root.seed)
     hidden = runs.lineage_hidden(root=root)
     assert hidden <= set(probe)
     assert sum(t.startswith("fail") for t in hidden) == 2 and sum(t.startswith("pass") for t in hidden) == 2
     text = (paths.node_dir(name="root") / "hidden.txt").read_text()
     assert text.startswith("# hidden from the teacher: 4 tasks of root's probe set (seed 1)\n")
-    runs.write_probe(root=root, nodes=[root], repos=_repos(node=root))
+    runs.write_probe(root=root, nodes=[root], repos=_repos(node=root), kinds={})
     assert runs.lineage_hidden(root=root) == hidden
 
 
@@ -163,14 +183,14 @@ def test_the_probe_spreads_its_successes_and_hidden_half_across_the_repos(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
-    monkeypatch.setattr(runs, "PROBE_SUCCESSES", 8)
-    # one big repo that passes a lot, and three small ones, like Django against the rest
+    monkeypatch.setattr(runs, "PROBE_TASKS", 12)
+    # one big repo that passes a lot and 3 small ones, like Django vs the other repos
     outcomes = {f"big-{i}": True for i in range(30)} | {f"{r}-{i}": True for r in ("x", "y", "z") for i in range(2)}
     outcomes |= {f"big-f{i}": False for i in range(4)} | {f"x-f{i}": False for i in range(2)}
     root = _scored(name="root", outcomes=outcomes)
-    probe = runs.write_probe(root=root, nodes=[root], repos=_repos(node=root))
+    probe = runs.write_probe(root=root, nodes=[root], repos=_repos(node=root), kinds={})
     successes = [iid for iid in probe if root.runs[iid].resolved]
-    # by size alone the big repo would take nearly all 8, and a small one could be left out
+    # picking by size alone would give the big repo nearly all 6 solved slots and could leave out a small repo
     assert {iid.split("-")[0] for iid in successes} == {"big", "x", "y", "z"}
     hidden = runs.lineage_hidden(root=root)
     for repo in ("big", "x"):

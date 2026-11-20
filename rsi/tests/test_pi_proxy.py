@@ -120,7 +120,7 @@ def test_forwarder_counts_a_cut_streams_chunks_as_its_tokens() -> None:
         _chunk(data=b'data: {"choices":[{"delta":{"reasoning_content":"' + word + b'"}}],"usage":null}\n\n')
         for word in (b"1,", b" 2,", b" 3,")
     )
-    # the harness hung up in the middle of the next chunk, so the server never reported usage
+    # pi hung up in the middle of the next chunk, so the model server never sent usage
     cut = stream + b"40\r\ndata: {"
     assert _read(direction="read_responses", data=cut, methods=("POST",)) == [
         {"usage": {"completion_tokens": 3}, "from": "stream chunks"}
@@ -306,70 +306,6 @@ def test_sandbox_ip() -> None:
     assert calls == ["reload"]
 
 
-class _TaskContainer:
-    def __init__(self, out: Path, log_file: Path, sent: list[dict]) -> None:
-        self.out = out
-        self.log_file = log_file
-        self.sent = sent
-        self.short_id = "task"
-        self.status = "running"
-        self.attrs: dict = {}
-
-    def reload(self) -> None:
-        self.attrs = {"NetworkSettings": {"Networks": {"rsi-sandbox-11501": {"IPAddress": "172.20.0.3"}}}}
-
-    def wait(self, timeout: int) -> dict[str, int]:
-        message = {"role": "assistant", "stopReason": "stop", "usage": {"input": 30, "output": 5}}
-        (self.out / "events.jsonl").write_text(json.dumps({"type": "message_end", "message": message}) + "\n")
-        (self.out / "patch.diff").write_text("+fix\n")
-        (self.out / pi.STAGING_FAILED).write_text("fatal: Unable to create '/testbed/.git/index.lock'\n")
-        with self.log_file.open("a") as fh:
-            fh.writelines(json.dumps(line) + "\n" for line in self.sent)
-        self.status = "exited"
-        return {"StatusCode": 0}
-
-    def logs(self, tail: int) -> bytes:
-        return b""
-
-    def remove(self, force: bool) -> None:
-        pass
-
-
-class _Docker:
-    def __init__(self, task: _TaskContainer) -> None:
-        self.task = task
-        self.proxy: _Proxy | None = None
-        self.volumes: dict[str, dict[str, str]] = {}
-        self.networks = SimpleNamespace(get=lambda name: _Network())
-        self.images = SimpleNamespace(get=lambda image: SimpleNamespace(attrs={"Id": f"sha256:{image}"}))
-        self.containers = self
-
-    def get(self, name: str) -> _Proxy:
-        if name.startswith("rsi-model-proxy-") and self.proxy is not None:
-            return self.proxy
-        raise pi.docker.errors.NotFound(name)
-
-    def run(
-        self,
-        image: str,
-        command: list[str],
-        name: str,
-        detach: bool,
-        volumes: dict[str, dict[str, str]],
-        labels: dict[str, str] | None = None,
-        extra_hosts: dict[str, str] | None = None,
-        restart_policy: dict[str, str] | None = None,
-        environment: dict[str, str] | None = None,
-        network: str = "",
-        working_dir: str = "",
-    ) -> _Proxy | _TaskContainer:
-        if labels is not None:
-            self.proxy = _Proxy(labels=labels, removed=[])
-            return self.proxy
-        self.volumes = volumes
-        return self.task
-
-
 def test_a_task_run_keeps_its_share_of_the_request_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -397,8 +333,25 @@ def test_a_task_run_keeps_its_share_of_the_request_log(
         {"ip": "172.20.0.3", "usage": {"prompt_tokens": 50, "completion_tokens": 7}},
     ]
     out = tmp_path / "runs" / "n" / "instances" / "a__b-1"
-    client = _Docker(task=_TaskContainer(out=out, log_file=log_file, sent=sent))
-    monkeypatch.setattr(pi.docker, "from_env", lambda: client)
+    seen: dict = {}
+
+    def run_task(
+        client: object, instance: core.Instance, out_dir: Path, network: str, volumes: dict, act: object, name: str
+    ) -> tuple[str, str | None, float, str]:
+        seen.update(network=network, volumes=volumes, name=name)
+        message = {"role": "assistant", "stopReason": "stop", "usage": {"input": 30, "output": 5}}
+        (out_dir / "events.jsonl").write_text(json.dumps({"type": "message_end", "message": message}) + "\n")
+        (out_dir / "patch.diff").write_text("+fix\n")
+        (out_dir / pi.STAGING_FAILED).write_text("fatal: Unable to create '/testbed/.git/index.lock'\n")
+        with log_file.open("a") as fh:
+            fh.writelines(json.dumps(line) + "\n" for line in sent)
+        return "ok", None, 5.0, "172.20.0.3"
+
+    monkeypatch.setattr(pi, "run_task", run_task)
+    monkeypatch.setattr(pi, "pi_volume", lambda client: "rsi-pi-test")
+    monkeypatch.setattr(pi, "sandbox_network", lambda client, endpoint: "rsi-sandbox-11501")
+    images = SimpleNamespace(get=lambda image: SimpleNamespace(attrs={"Id": f"sha256:{image}"}))
+    monkeypatch.setattr(pi.docker, "from_env", lambda: SimpleNamespace(images=images))
     ctx = harness.RunContext(
         instance=core.Instance(instance_id="a__b-1", repo="a/b", image="img", workdir="/testbed", task="Fix it."),
         out_dir=out,
@@ -413,9 +366,12 @@ def test_a_task_run_keeps_its_share_of_the_request_log(
     with caplog.at_level(logging.WARNING):
         run = pi.HARNESS.run(ctx=ctx)
     assert run.status == "ok" and run.patch == "+fix\n"
-    assert client.volumes[str(out)] == {"bind": "/out", "mode": "rw"}
-    assert client.volumes[str(out / "piagent" / "extensions")] == {"bind": "/out/piagent/extensions", "mode": "ro"}
-    assert client.volumes[str(out / "piagent" / "models.json")] == {"bind": "/out/piagent/models.json", "mode": "ro"}
+    assert (seen["network"], seen["name"]) == ("rsi-sandbox-11501", "rsi-a__b-1")
+    volumes = seen["volumes"]
+    assert volumes["rsi-pi-test"] == {"bind": pi.PI_HOME, "mode": "ro"}
+    assert volumes[str(out)] == {"bind": "/out", "mode": "rw"}
+    assert volumes[str(out / "piagent" / "extensions")] == {"bind": "/out/piagent/extensions", "mode": "ro"}
+    assert volumes[str(out / "piagent" / "models.json")] == {"bind": "/out/piagent/models.json", "mode": "ro"}
     kept = [json.loads(line) for line in (out / "requests.jsonl").read_text().splitlines()]
     assert kept == [line for line in sent if line["ip"] == "172.20.0.3"]
     assert (run.metrics.requests, run.metrics.input_tokens, run.metrics.output_tokens) == (2, 80, 12)

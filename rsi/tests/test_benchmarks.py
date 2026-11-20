@@ -11,7 +11,8 @@ def test_get_unknown_raises() -> None:
 
 
 def test_registry_lists_benchmark_folders() -> None:
-    assert folders.names(root=paths.benchmarks_dir(), file="benchmark.py") == ["swebench_verified"]
+    found = folders.names(root=paths.benchmarks_dir(), file="benchmark.py")
+    assert found == ["coding_mix", "swebench_pro", "swebench_verified", "terminal_bench_2_1"]
     mod = folders.module(root=paths.benchmarks_dir(), name="swebench-verified", file="benchmark.py")
     assert benchmarks.get(name="swebench-verified") is mod.BENCHMARK
 
@@ -58,7 +59,7 @@ def test_select_zero_and_oversize_returns_all(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_select_gives_each_repo_a_share_by_the_square_root_of_its_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    # one repo with 100 tasks and four with 4 each, like Django against the small ones
+    # one repo with 100 tasks and 4 repos with 4 each, like Django vs the small repos
     sizes = {"big": 100, "a": 4, "b": 4, "c": 4, "d": 4}
     rows = [
         {"instance_id": f"{repo}__{repo}-{i}", "repo": repo, "base_commit": "c", "problem_statement": "p"}
@@ -68,7 +69,15 @@ def test_select_gives_each_repo_a_share_by_the_square_root_of_its_size(monkeypat
     monkeypatch.setattr(benchmarks, "rows", lambda spec: rows)
     bm = benchmarks.get(name="swebench-verified")
     picked = Counter(i.repo for i in bm.select(tasks=20, seed=3))
-    # shares of 20 by the square root of each size: 11.1 for big and 2.2 for each small repo, the last task going to
-    # the repo furthest under its share. By size alone big would get 17 and each small one less than one
+    # split 20 by the square root of each size, i.e. 11.1 for big and 2.2 for each small repo, and give the last task
+    # to the repo furthest under its share. By size alone, big would get 17 and each small repo less than 1
     assert picked["big"] == 11 and sorted(picked[r] for r in "abcd") == [2, 2, 2, 3]
     assert [i.instance_id for i in bm.select(tasks=20, seed=3)] == [i.instance_id for i in bm.select(tasks=20, seed=3)]
+
+
+def test_leaving_a_task_out_of_a_sample_swaps_in_one_other_and_keeps_the_rest() -> None:
+    ids = [f"t-{i}" for i in range(40)]
+    repos = {iid: iid for iid in ids}
+    picked = benchmarks.spread(ids=ids, repos=repos, count=10, seed=3)
+    again = benchmarks.spread(ids=[iid for iid in ids if iid != picked[4]], repos=repos, count=10, seed=3)
+    assert len(again) == 10 and set(picked) - set(again) == {picked[4]}

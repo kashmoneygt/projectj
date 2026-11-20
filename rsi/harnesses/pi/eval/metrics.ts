@@ -1,12 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendFileSync } from "node:fs";
 
-// Measures model calls for the rsi runner, writing one JSON line per event to RSI_METRICS_PATH.
-// For each request we write how its context splits up (counted with /tokenize) and the parameters as
-// sent (model, sampling, output cap), and, whenever they change, the system prompt and tool definitions.
-// This extension loads after the variant's, so it sees the request after every variant hook ran. For each
-// assistant message we write ttft (start to first token), gen, and thinking (first token to first content token).
-// A failure in here should never break the run.
+// Measures model calls for the rsi runner, appending one JSON line per event to RSI_METRICS_PATH.
+// For each request, log (1) how many tokens the system prompt, tool definitions and messages take (counted with the
+// model server's /tokenize), (2) the params as sent, e.g. model, sampling and output cap, and (3) the system prompt
+// and tool definitions whenever they change. This extension loads after the variant's, so it sees each request after
+// every variant hook ran. For each assistant message, log ttft (start to first token), gen (start to end) and think
+// (first token to first content token) times. A failure in here should never break the run.
+// Only the agent's own pi logs. A second pi that a variant starts loads this extension too, but its calls run inside
+// one of the agent's tool calls, and the forwarder already counts their requests and tokens.
 const root = process.env.RSI_MODEL_ROOT ?? "";
 const out = process.env.RSI_METRICS_PATH ?? "";
 
@@ -38,6 +40,10 @@ function writeLine(line: object) {
 
 export default function (pi: ExtensionAPI) {
 	if (!root || !out) return;
+	// the agent's pi claims the log, and a second pi inherits the claim through its environment
+	const owner = process.env.RSI_METRICS_PID;
+	if (owner && owner !== String(process.pid)) return;
+	process.env.RSI_METRICS_PID = String(process.pid);
 	let msgStartTs = 0;
 	let firstTokenTs = 0;
 	let firstContentTs = 0;
@@ -104,7 +110,6 @@ export default function (pi: ExtensionAPI) {
 			const message = event.message;
 			if (message.role !== "assistant" || !msgStartTs) return;
 			const endTs = Date.now();
-			// think_ms: from the first token (which may be thinking) to the first content token
 			writeLine({
 				type: "timing",
 				ts: endTs,

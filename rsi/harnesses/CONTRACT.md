@@ -64,29 +64,31 @@ on, and a person who just asked would not. The rest is up to the teacher and to 
   stay fixed so generations compare. How the model thinks within them is the harness's to change, through what it's
   told and what it sees.
 - **The environment** (container, repo state, network): the benchmark protocol's. A benchmark may give each instance
-  setup commands (`Instance.setup`), and every harness runs them in the repo before the agent starts.
+  setup commands (`Instance.setup`), and every harness runs them in the task's working folder before the agent starts.
 - **The task message**: the benchmark's, written the way a person would ask for the work. The harness adds nothing to
   it, so it says nothing about how the work is judged.
 - **The evaluation contract**: the instrumentation (metrics that only read each request), the provider config and the
-  per-request output cap, the per-task wall clock and the one-shot execution mode. The baseline is the
-  harness as it ships, with no turn limit and no settings of the runner's own. A run still going at the wall clock is
-  stopped and scored on whatever the repo holds.
+  per-request output cap, the per-task budget (a wall clock and a number of model requests) and the one-shot
+  execution mode. The baseline is the harness as it ships, with no settings of the runner's own. A run that reaches
+  its budget is stopped, the model isn't told, and it's scored on whatever it left: the repo, and the agent's last
+  message, which the harness puts at `/logs/agent/response.txt` before grading for tasks that ask a question.
 
 Each harness pins the contract as far as its extension model allows:
 
-- **pi**: on every start the runner installs the metrics extension and `models.json` into the task's agent dir,
-  outside the read-only variant package, and mounts both read-only (pi writes its own files next to them). It enforces
-  the wall clock whatever the variant loads. pi's extension API can still reach the request
+- **pi**: on every start the runner installs the metrics and request-budget extensions and `models.json` into the task's
+  agent dir, outside the read-only variant package, and mounts them read-only (pi writes its own files next to them). It
+  enforces the wall clock whatever the variant loads. pi's extension API can still reach the request
   (`before_provider_request`), the model and thinking level (`setModel`, `setThinkingLevel`, providers) and the
   instrumentation's environment, all in-process, so `check-variant` rejects packages that use those surfaces, and
-  `settings.json` only takes the keys about how the agent works and the display (no model, provider, thinking
-  level or thinking budget, no proxy, no code or files from outside the package). Every request is audited where it
-  leaves the container: the forwarder on the sandbox network logs each one's parameters (not its messages) and the
-  usage the server reports, and each task keeps its container's share in `requests.jsonl`. So nested calls
-  (`ctx.modelRegistry`) and second `pi` processes are checked against the pinned spec like the agent's own requests
-  (`contract_violations` on each task, which also flags keys pi doesn't send) and count toward the task's requests and
-  tokens. pi sends a thinking budget only when the provider config names the server's budget field, which the
-  runner's `models.json` never does, so no run has one, as with plain pi.
+  `settings.json` only takes the keys about how the agent works and the display (no model, provider, thinking level or
+  thinking budget, no proxy, no code or files from outside the package). Every request of a task without the internet is
+  audited where it leaves the container (one with it could reach the model server some other way): the forwarder on the
+  sandbox network logs each one's parameters (not its messages) and the usage the server reports, and each task keeps
+  its container's share in `requests.jsonl`. So nested calls (`ctx.modelRegistry`) and second `pi` processes are checked
+  against the pinned spec like the agent's own requests (`contract_violations` on each task, which also flags keys pi
+  doesn't send and requests past the budget) and count toward the task's requests and tokens. pi sends a thinking budget
+  only when the provider config names the server's budget field, which the runner's `models.json` never does, so no run
+  has one, as with plain pi.
 - **deepseek-harness** (design): the runner mounts the instrumentation in a composition layer the variant's patches
   can't override (layers apply in a fixed order and the top one wins), and the composition is verified at boot.
 
@@ -107,7 +109,7 @@ Each harness starts the teacher's container (`Harness.teacher_container`). It ha
 prompt names them:
 
 - `check-variant <dir>` runs the checks a variant has to pass before it's run: its card, and the harness's own rules.
-- `try-variant <dir> <repo> <task file>` runs a package on a repo the way a task run does, against the agent's own
+- `try-variant <dir> <repo> <task file>` runs a package on a repo much like a task run, against the agent's own
   model, and `try-variant --question <dir>` asks the agent a question about a small repo that needs no change.
 
 The harness's own doc, copied to `/work/harness.md`, says how its packages work, what's in the files of a run the

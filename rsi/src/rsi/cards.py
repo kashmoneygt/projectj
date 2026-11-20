@@ -4,9 +4,9 @@ import re
 import sys
 from pathlib import Path
 
-FILE = "variant.json"  # never reaches the agent
+FILE = "variant.json"  # the variant's card, never shown to the agent
 TITLE_MAX = 72
-NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")  # variant name
+NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")  # regex for a valid variant name
 TEXT = ("title", "what", "why", "expect")
 
 
@@ -16,7 +16,7 @@ class VariantCard:
     what: str
     why: str = ""
     expect: str = ""
-    reuses: tuple[str, ...] = ()  # variants whose ideas it builds on
+    reuses: tuple[str, ...] = ()  # names of variants this one builds on
 
 
 def problems(text: str) -> list[str]:
@@ -40,7 +40,7 @@ def problems(text: str) -> list[str]:
 
 
 def parse(text: str) -> VariantCard:
-    """A card from text that has no problems"""
+    """Parse a card, assuming problems() found nothing wrong with the text"""
     card = json.loads(text)
     return VariantCard(
         title=card["title"].strip(),
@@ -52,7 +52,7 @@ def parse(text: str) -> VariantCard:
 
 
 def read(package: Path) -> VariantCard | None:
-    """A package's card, or None if it has none or it has problems"""
+    """Read a package's card, or None if it's missing or has problems"""
     file = package / FILE
     if not file.is_file():
         return None

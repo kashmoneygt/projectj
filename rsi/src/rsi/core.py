@@ -15,13 +15,13 @@ class DatasetSpec(Frozen):
     name: str
     dataset_id: str
     split: str = "test"
-    revision: str = ""  # pinned HF dataset revision
-    request: str = "{task}"  # how a task is put to the agent; {task} is the task's own text
+    revision: str = ""  # pinned dataset revision, e.g. an HF revision or a git commit
+    request: str = "{task}"  # template for the message the agent gets; {task} becomes the task text
     setup: str = ""  # shell commands run in the task's repo before the agent starts
 
     @property
     def lead(self) -> str:
-        """What every task message starts with"""
+        """Text every task message starts with, i.e. the request up to {task}"""
         return self.request.partition("{task}")[0]
 
 
@@ -29,17 +29,17 @@ class ModelSpec(Frozen):
     """Model serving parameters (from models.toml)"""
 
     name: str
-    # "hf:<org>/<name>/<file>", "path:/abs/file.gguf" or "splash:OWNER/REPO[:VARIANT]"
+    # weights to serve, as "hf:<org>/<name>/<file>", "path:/abs/file.gguf" or "splash:OWNER/REPO[:VARIANT]"
     source: str
-    model_id: str  # the name the server serves it under
+    model_id: str  # name the server serves the model under
     backend: str = "llama.cpp"  # a folder under backends/
     port: int = 11500
-    ctx: int = 32768  # context window (input + output)
+    ctx: int = 32768  # context window in tokens (input + output)
     parallel: int = 1  # requests the server runs at once
-    memory_gb: int = 0  # the server's memory cap, 0 = none
+    memory_gb: int = 0  # memory cap for the server, 0 = no cap
     seed: int = 42  # sampling seed
-    thinking: bool = False  # thinking mode
-    max_output_tokens: int = 0  # per response, 0 = the rest of the context window
+    thinking: bool = False
+    max_output_tokens: int = 0  # cap per response, 0 = no cap beyond the context window
     sampling: dict[str, Any] = Field(default_factory=dict)  # sent with every request
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)  # for the server's chat template
 
@@ -68,20 +68,41 @@ class ModelBackend(Protocol):
     def endpoint(self) -> ModelEndpoint: ...
     def status_lines(self) -> list[str]: ...
     def identity(self) -> dict[str, str]: ...  # version, weights and build, saved on every node
-    def healthy(self, timeout_s: float) -> bool: ...  # answers a one-token request in time
+    def healthy(self, timeout_s: float) -> bool: ...  # True if the server answers a one-token request in time
 
 
 class Budget(Frozen):
-    timeout_s: int = 3600  # per task, after which the run is scored as is
+    timeout_s: int = 3600  # per task, then stop the agent and grade what it left
+    max_calls: int = 0  # model requests per task, then stop the agent and grade what it left (0 = no limit)
+
+
+class Verifier(Frozen):
+    """Harbor-style grading that runs in the task's container after the agent is done"""
+
+    tests: str  # host folder copied to /tests right before grading
+    command: str  # shell command run in the workdir, with its output saved in logs
+    timeout_s: int = 600
+    internet: bool = False
+    env: dict[str, str] = Field(default_factory=dict)
+    logs: str = "/logs/verifier"  # container folder copied back into verifier/ in the task's run folder
+    results: tuple[str, ...] = ("reward.json", "reward.txt")  # grader leaves one of these in logs, or grading failed
 
 
 class Instance(Frozen):
     instance_id: str
-    repo: str
-    image: str  # docker image the task runs and gets graded in
-    workdir: str  # where the task's repo is in that image
-    task: str  # the message the agent gets, as a user would write it
-    setup: str = ""  # shell commands run in the repo before the agent starts
+    repo: str  # repo the task's code comes from, used to spread samples across repos
+    image: str  # Docker image the task runs and is graded in
+    workdir: str  # folder the agent starts in, "" = the image's WORKDIR
+    task: str  # message the agent gets, worded like a user's request
+    setup: str = ""  # shell commands run in the workdir before the agent starts
+    login: bool = False  # start the agent in a login shell, for images that set up tools in shell profiles
+    internet: bool = False  # whether the agent can reach the internet
+    cpus: float = 0.0  # 0 = no limit
+    memory_mb: int = 0  # 0 = no limit
+    env: dict[str, str] = Field(default_factory=dict)  # env vars for the task's container
+    verifier: Verifier | None = None  # None if the benchmark grades the diff itself
+    solution: str = ""  # host folder with a reference solution, copied to /solution only to check the grader
+    kind: str = ""  # kind of work, so results can be split by kind
 
 
 class ToolStat(BaseModel):
@@ -91,33 +112,33 @@ class ToolStat(BaseModel):
 
 
 class TaskMetrics(BaseModel):
-    """One task's metrics, over every model call its run made"""
+    """Metrics for one task, across all model calls in its run"""
 
     requests: int = 0
     input_tokens: int = 0  # uncached prompt tokens
-    output_tokens: int = 0
+    output_tokens: int = 0  # thinking included
     cache_read_tokens: int = 0
     reasoning_tokens: int = 0
     tool_ms: int = 0
     tool_stats: dict[str, ToolStat] = Field(default_factory=dict)
-    final_event: str = ""  # last event type in the harness's stream
-    tok_s: float = 0.0  # output tokens per second of non-tool time
+    tok_s: float = 0.0  # output tokens per second, not counting tool time
     context_pct: float = 0.0  # largest prompt as a % of the context window
     # token breakdown of the largest request
     system_tokens: int = 0
     tool_def_tokens: int = 0
     message_tokens: int = 0
-    ttft_first_ms: float = 0.0  # first request's, cold start included
+    ttft_first_ms: float = 0.0  # TTFT of the first request, cold start included
     ttft_avg_ms: float = 0.0
     ttft_max_ms: float = 0.0
     model_ms: int = 0  # generation time, thinking included
     think_ms: int = 0  # part of model_ms before the first content token
-    stop_reason: str = ""  # last request's (stop, length, toolUse, ...)
+    stop_reason: str = ""  # stop reason of the last request (stop, length, toolUse, ...)
     patch_lines: int = 0  # non-empty lines in the final diff
     peak_output_tokens: int = 0  # largest single response, thinking included
-    capped_requests: int = 0  # responses cut at the output cap
-    acted: int = 0  # times the variant said it kicked in
-    contract_violations: list[str] = Field(default_factory=list)  # requests off the pinned model settings
+    capped_requests: int = 0  # responses cut off at the output cap
+    acted: int = 0  # times the variant logged that it kicked in
+    # ways the model requests broke the pinned settings or the call budget
+    contract_violations: list[str] = Field(default_factory=list)
 
 
 class TaskRun(BaseModel):
@@ -136,18 +157,19 @@ class Node(BaseModel):
 
     name: str
     parent: str | None = None
-    title: str | None = None  # the variant card's title
+    title: str | None = None  # title from the variant card
     dataset: DatasetSpec
     harness: str
     harness_version: str
-    variant: str = ""  # a registered variant's name, another package's dir, or "" for the baseline
+    variant: str = ""  # name of a variant in variants/, a package path, or "" for the baseline
     model: ModelSpec
     budget: Budget
     tasks: int
     seed: int
-    task_ids: list[str] = Field(default_factory=list)  # checked on resume
+    task_ids: list[str] = Field(default_factory=list)  # selected tasks, checked again on resume
+    kinds: dict[str, str] = Field(default_factory=dict)  # task id -> kind of work, for tasks that have one
     machine: str = ""
-    # what produced the runs, so runs made differently are never compared
+    # server identity, harness contract and package digest, so runs made differently are never compared
     server: dict[str, str] = Field(default_factory=dict)
     contract: str = ""
     variant_digest: str = ""

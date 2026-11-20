@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 
-OUTPUT_CHARS = 15_000  # per tool result (Copilot only previews results over ~20 KB)
+OUTPUT_CHARS = 15_000  # max chars per tool result, since Copilot only previews results over ~20 KB
 DEFAULT_TIMEOUT_S = 600
 MAX_TIMEOUT_S = 3600
 READ_LINES = 400
@@ -80,7 +80,7 @@ TOOLS = [
 
 
 def in_container(container: str, args: list[str], stdin: bytes | None, timeout_s: int) -> tuple[int, bytes]:
-    """Run a command in the container, under its own `timeout` so nothing outlives us"""
+    """Run a command in the container under `timeout`, so it gets killed there before we stop waiting"""
     command = ["docker", "exec", "-i", container, "timeout", "-k", "5", str(timeout_s), *args]
     try:
         done = subprocess.run(command, input=stdin, capture_output=True, timeout=timeout_s + 30, check=False)
@@ -90,7 +90,7 @@ def in_container(container: str, args: list[str], stdin: bytes | None, timeout_s
 
 
 def clip(text: str, limit: int) -> str:
-    """Keep the start and end of text over the limit"""
+    """Keep only the start and end of text longer than limit"""
     if len(text) <= limit:
         return text
     half = limit // 2
@@ -170,7 +170,7 @@ def time_left(deadline: float) -> str:
 
 def handle(container: str, deadline: float, message: dict) -> None:
     if "id" not in message:
-        return  # a notification, like notifications/initialized
+        return  # notifications like notifications/initialized get no reply
     reply: dict = {"jsonrpc": "2.0", "id": message["id"]}
     try:
         params = message.get("params") or {}

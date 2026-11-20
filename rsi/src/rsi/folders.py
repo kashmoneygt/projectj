@@ -21,7 +21,7 @@ def module(root: Path, name: str, file: str, kind: str = "module") -> ModuleType
         spec = importlib.util.spec_from_file_location(key, path)
         assert spec is not None and spec.loader is not None
         mod = importlib.util.module_from_spec(spec)
-        sys.modules[key] = mod  # dataclasses and pydantic look modules up here
+        sys.modules[key] = mod  # dataclasses and pydantic look the module up in sys.modules while its code runs
         try:
             spec.loader.exec_module(mod)
         except BaseException:

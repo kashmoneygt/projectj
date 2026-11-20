@@ -1,6 +1,7 @@
 import dataclasses
 import difflib
 import hashlib
+import itertools
 import json
 import re
 from collections.abc import Collection
@@ -21,8 +22,8 @@ def safe_variant_name(name: str) -> str:
 
 
 def free_name(proposed: str, taken: Collection[str]) -> str:
-    """Make the teacher's name for a variant valid and unique (-2, -3, ...)"""
-    # baseline is the harness as it ships, and parent holds the parent's runs in the teacher's /work/runs/
+    """Make the teacher's name for a variant valid and unique, adding -2, -3, ... if it's taken"""
+    # reserve "baseline" (the harness as it ships) and "parent" (holds the parent's runs in the teacher's /work/runs/)
     reserved = {*taken, "baseline", "parent"}
     base = "-".join(re.findall(r"[a-z0-9]+", proposed.lower()))[:40].strip("-") or "variant"
     if not base[0].isalpha():
@@ -63,13 +64,13 @@ def resolve_variant(reference: str) -> Path:
 
 
 def reference(package: Path) -> str:
-    """What a node records for its variant (a registered one's name, so records survive a move, or else its path)"""
+    """What a node records as its variant, i.e. a registered variant's name (so records survive a move) or a path"""
     package = package.resolve()
     return package.name if package.parent == paths.variants_dir().resolve() else str(package)
 
 
 def run_label(node: core.Node) -> str:
-    """A run by its variant and seed, without the model and benchmark names its node has"""
+    """Short label for a run, i.e. its variant and seed without the model and benchmark from its node name"""
     return f"{variant_name(reference=node.variant)} s{node.seed}"
 
 
@@ -108,7 +109,7 @@ DIFF_ENTRIES = 12  # files listed in a diff summary before "+N more"
 
 
 def diff_summary(base: Path, variant: Path) -> str:
-    """One line of the files a variant added (+), removed (-) or changed (~)"""
+    """One-line summary of the files a variant added (+), removed (-) or changed (~)"""
     base_files, variant_files = package_files(root=base), package_files(root=variant)
     entries: list[str] = []
     for name in sorted(set(base_files) | set(variant_files)):
@@ -157,7 +158,7 @@ def unified_diff(base: Path, variant: Path) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class VariantEntry:
-    """A variant in the tree: its card and origin (results live in node records)"""
+    """A variant's entry in the tree, i.e. its card and where it came from (results live in node records)"""
 
     name: str
     parent: str  # parent variant ('baseline' for the first round)
@@ -168,10 +169,10 @@ class VariantEntry:
     what: str
     why: str
     expect: str
-    reuses: list[str]  # variants whose ideas it builds on
+    reuses: list[str]  # names of variants it builds on
     diff: str  # diff_summary vs the parent's package
-    round: str = ""  # a folder in the parent node's generations/
-    session: int = 0  # its session's number in that round
+    round: str = ""  # folder name under runs/<parent_node>/generations/
+    session: int = 0  # which session of the round made it (1, 2, ...)
     # added by hand in tree.json
     note: str = ""
 
@@ -237,6 +238,39 @@ def variant_nodes(entry: VariantEntry, nodes: list[core.Node]) -> list[core.Node
     )
 
 
+def lineage_entries(
+    root: core.Node, entries: dict[str, VariantEntry], nodes: list[core.Node]
+) -> dict[str, VariantEntry]:
+    """Variants made in root's lineage, so the teacher never sees another lineage's variants"""
+    members = {n.name for n in tree.members(root=root.name, nodes=nodes)}
+    return {name: entry for name, entry in entries.items() if entry.parent_node in members}
+
+
+def by_kind(variant: list[core.Node], reference: list[core.Node], tasks: list[str]) -> dict[str, stats.Evidence]:
+    """Evidence on solves vs the reference for each kind of work, or {} unless the tasks cover 2+ kinds"""
+    kinds = variant[0].kinds if variant else {}
+    groups: dict[str, list[str]] = {}
+    for task in tasks:
+        groups.setdefault(kinds.get(task, ""), []).append(task)
+    if len(groups) < 2:
+        return {}
+    return {
+        kind: stats.evidence(variant=variant, reference=reference, tasks=group)
+        for kind, group in sorted(groups.items())
+    }
+
+
+def regressions(ran: list[core.Node], parent: core.Node | None, nodes: list[core.Node]) -> list[str]:
+    """The kinds of work these runs do worse at than the parent's harness, beyond noise"""
+    if not ran or parent is None:
+        return []
+    tasks = tree.task_set(node=ran[0])
+    reference = tree.reference_runs(parent=parent, tasks=tasks, nodes=nodes)
+    if not reference:
+        return []
+    return stats.worse_kinds(kinds=by_kind(variant=ran, reference=reference, tasks=list(tasks)))
+
+
 def result_line(node: core.Node, nodes: list[core.Node]) -> str:
     """A run's score vs its parent's run on the same tasks, plus any change in behavior"""
     if node.total == 0:
@@ -251,7 +285,7 @@ def result_line(node: core.Node, nodes: list[core.Node]) -> str:
 
 
 def pooled_runs(entry: VariantEntry, nodes: list[core.Node]) -> tuple[list[core.Node], list[core.Node], list[str]]:
-    """A variant's scored runs on its first run's tasks, the parent harness's runs on them, and the tasks"""
+    """A variant's scored runs on the same tasks as its first one, the parent harness's runs on them, and the tasks"""
     ran = [n for n in variant_nodes(entry=entry, nodes=nodes) if n.total > 0]
     if not ran:
         return [], [], []
@@ -262,7 +296,7 @@ def pooled_runs(entry: VariantEntry, nodes: list[core.Node]) -> tuple[list[core.
 
 
 def unscored(entry: VariantEntry, nodes: list[core.Node]) -> str:
-    """Why a variant has no scored run: it wasn't run, or its runs aren't scored yet (with the first error)"""
+    """Why a variant has no scored run, i.e. it wasn't run or isn't scored yet (with the first error if any)"""
     made = variant_nodes(entry=entry, nodes=nodes)
     if not made:
         return "not run"
@@ -270,14 +304,14 @@ def unscored(entry: VariantEntry, nodes: list[core.Node]) -> str:
     if not errors:
         return "not scored yet"
     task, error = errors[0]
-    # drop the task id, which may be a hidden task
+    # mask the task id, since the teacher sees this error and the task may be a hidden one
     error = re.sub(re.escape(task), "<task>", error, flags=re.IGNORECASE)
     first = " ".join(error.split())[:200].replace("|", "/")
     return f"not scored yet; first error: {first}"
 
 
 def activations(entry: VariantEntry, nodes: list[core.Node]) -> str:
-    """How many scored task runs a variant kicked in on, if it logs that, and as many for its parent's harness"""
+    """How many scored task runs a variant kicked in on, if it logs that, and the same for its parent's harness"""
     same, reference, _ = pooled_runs(entry=entry, nodes=nodes)
     package = resolve_variant(reference=same[0].variant) if same else None
     if package is None or not harness.load(name=same[0].harness).records_activations(package=package):
@@ -285,27 +319,34 @@ def activations(entry: VariantEntry, nodes: list[core.Node]) -> str:
     mine = [run.metrics.acted > 0 for n in same for run in n.runs.values()]
     theirs = [run.metrics.acted > 0 for n in reference for run in n.runs.values()]
     line = f"kicked in on {sum(mine)} of {len(mine)} task runs"
-    # a variant carries its parent's changes, which count the same way
+    # the variant keeps its parent's changes, and they can kick in too, so show the parent's count to compare with
     return line + (f", against {sum(theirs)} of {len(theirs)} for its parent's harness" if any(theirs) else "")
 
 
 @dataclasses.dataclass(frozen=True)
 class Standing:
-    """A variant's scored runs against every run of its parent's harness"""
+    """How a variant's scored runs compare with every run of its parent's harness"""
 
     runs: int
     tasks: int
     solved: float  # tasks solved per run
     solves: stats.Evidence
     hidden: stats.Evidence | None  # on the tasks hidden from the teacher
+    kinds: dict[str, stats.Evidence]  # on each kind of work, when there's more than one
     tokens: stats.TokenEvidence
     problems: list[str]  # why these runs can't be compared, if they can't
     broke: int  # task runs that broke the contract
 
     @property
+    def worse_at(self) -> list[str]:
+        """The kinds of work it does worse at, beyond noise"""
+        return stats.worse_kinds(kinds=self.kinds)
+
+    @property
     def better_by(self) -> str:
-        """Return "solves" (beyond noise, hidden tasks too), "tokens" (fewer tokens, as many solves) or "" if neither"""
-        if self.problems or self.broke:
+        """Return "solves" (beyond noise, ahead on hidden tasks), "tokens" (no fewer solves, fewer tokens) or "" """
+        # not better if it's worse at any kind of work, however it does overall
+        if self.problems or self.broke or self.worse_at:
             return ""
         holds = self.hidden is None or self.hidden.gain > 0
         if self.solves.z >= stats.NOISE_Z and holds:
@@ -319,7 +360,7 @@ BETTER = {"solves": "solves more", "tokens": "solves as many with fewer tokens"}
 
 
 def standing(entry: VariantEntry, nodes: list[core.Node]) -> Standing | None:
-    """Compare a variant with its parent's harness, or None until both ran these tasks"""
+    """Compare a variant with its parent's harness, or None until both have scored runs on the same tasks"""
     same, reference, tasks = pooled_runs(entry=entry, nodes=nodes)
     if not same or not reference:
         return None
@@ -331,6 +372,7 @@ def standing(entry: VariantEntry, nodes: list[core.Node]) -> Standing | None:
         solved=sum(n.resolved for n in same) / len(same),
         solves=stats.evidence(variant=same, reference=reference, tasks=tasks),
         hidden=stats.evidence(variant=same, reference=reference, tasks=hidden) if hidden else None,
+        kinds=by_kind(variant=same, reference=reference, tasks=tasks),
         tokens=stats.token_evidence(variant=same, reference=reference, tasks=tasks),
         problems=tree.made_differently(compared=[*reference, *same], packages=[same, reference]),
         broke=sum(bool(run.metrics.contract_violations) for n in same for run in n.runs.values()),
@@ -353,6 +395,8 @@ def scoreboard(entry: VariantEntry, nodes: list[core.Node]) -> list[str]:
     lines.append(f"solved {found.solves.line()}")
     if found.hidden is not None:
         lines.append(f"on the {found.hidden.tasks} tasks hidden from the teacher {found.hidden.line()}")
+    for kind, evidence in found.kinds.items():
+        lines.append(f"on {kind or 'other work'} {evidence.line()}")
     lines.append(found.tokens.line())
     if found.broke:
         lines.append(f"broke the contract on {found.broke} task runs, so its result doesn't count")
@@ -376,4 +420,125 @@ def outcome(entry: VariantEntry, nodes: list[core.Node]) -> str:
         return "it changed what's fixed, so its runs don't count"
     if found.better_by:
         return f"better than its parent: {BETTER[found.better_by]}"
-    return "worse than its parent: solves fewer" if found.solves.z <= -stats.NOISE_Z else "no clear difference"
+    worse = f"worse at {' and '.join(found.worse_at)}" if found.worse_at else ""
+    if found.solves.z <= -stats.NOISE_Z:
+        return "worse than its parent: solves fewer" + (f", and {worse}" if worse else "")
+    return f"no clear difference overall, but {worse}" if worse else "no clear difference"
+
+
+FIRST_SEED = 42  # seed of a variant's first run, and each later run takes the next free seed
+MAX_RUNS = 3  # the most runs a variant gets in its own round (a parent also runs once more in each round made from it)
+
+
+@dataclasses.dataclass(frozen=True)
+class Contender:
+    """A harness and its scored runs on the lineage's probe set, oldest first"""
+
+    name: str  # a variant's name, or "baseline"
+    runs: list[core.Node]
+    regressed: tuple[str, ...] = ()  # kinds of work it does worse at than its parent's harness, beyond noise
+
+    @property
+    def solved(self) -> float:
+        return sum(n.resolved for n in self.runs) / len(self.runs)
+
+    @property
+    def tokens(self) -> float:
+        """Output tokens per task, over all its runs"""
+        return sum(tree.profile(node=n).output_tokens for n in self.runs) / len(self.runs)
+
+    @property
+    def broke(self) -> bool:
+        return any(run.metrics.contract_violations for n in self.runs for run in n.runs.values())
+
+    @property
+    def eligible(self) -> bool:
+        """Whether it can be picked, i.e. it kept the contract and isn't worse than its parent at any kind of work"""
+        return not self.broke and not self.regressed
+
+    def next_seed(self) -> int:
+        used = {n.seed for n in self.runs}
+        return next(seed for seed in itertools.count(start=FIRST_SEED) if seed not in used)
+
+
+def contender(name: str, root: core.Node, nodes: list[core.Node], parent: str = "") -> Contender:
+    """A harness's runs on the probe set of root's lineage with root's settings (parent is the node it came from)"""
+    tasks = tuple(sorted(runs.lineage_probe(root=root)))
+    found = sorted(
+        (
+            n
+            for n in nodes
+            if variant_name(reference=n.variant) == name
+            and n.total > 0
+            and tree.task_set(node=n) == tasks
+            and tree.comparable(a=n, b=root)
+        ),
+        key=lambda n: n.created,
+    )
+    made_from = next((n for n in nodes if n.name == parent), None)
+    return Contender(name=name, runs=found, regressed=tuple(regressions(ran=found, parent=made_from, nodes=nodes)))
+
+
+def newest_round(entries: dict[str, VariantEntry]) -> list[VariantEntry]:
+    """The variants of the newest round, in the order they were made"""
+    if not entries:
+        return []
+    newest = max(entries.values(), key=lambda e: e.created)
+    return sorted((e for e in entries.values() if e.round == newest.round), key=lambda e: e.created)
+
+
+def next_run(entries: dict[str, VariantEntry], nodes: list[core.Node]) -> tuple[str, int, str] | None:
+    """The newest round's next run as (variant, seed, why), or None once the round is narrowed down"""
+    batch = newest_round(entries=entries)
+    if not batch:
+        return None
+    root = tree.lineage(name=batch[0].parent_node, nodes=nodes)[0]
+    made_from = next((n for n in nodes if n.name == batch[0].parent_node), None)
+    if made_from is not None:
+        # a harness becomes the parent on runs that were likely lucky, so it runs once more in each round made from it.
+        # Otherwise its mean stays at that lucky high, and better variants rarely beat it
+        own = contender(name=variant_name(reference=made_from.variant), root=root, nodes=nodes)
+        started = datetime.fromisoformat(batch[0].created).timestamp()
+        if not any(n.created >= started for n in own.runs):
+            return own.name, own.next_seed(), f"{own.name} is the round's parent, so it runs once more"
+    made = [contender(name=e.name, root=root, nodes=nodes, parent=e.parent_node) for e in batch]
+    for new in made:
+        if not new.runs:
+            return new.name, new.next_seed(), f"{new.name} is new, so it runs once"
+    # rank by tasks solved in the first run, then by fewer output tokens on a tie
+    ranked = sorted(
+        (c for c in made if c.eligible),
+        key=lambda c: (-c.runs[0].resolved, tree.profile(node=c.runs[0]).output_tokens),
+    )
+    if not ranked:
+        return None
+    best = ranked[0]
+    if len(best.runs) < MAX_RUNS:
+        return best.name, best.next_seed(), f"{best.name} had the round's best first run, so it runs {MAX_RUNS} times"
+    if len(ranked) == 1:
+        return None
+    second = ranked[1]
+    if len(second.runs) < 2:
+        return second.name, second.next_seed(), f"{second.name} had the round's second best first run, so it runs again"
+    if len(second.runs) < MAX_RUNS and second.solved > best.solved:
+        why = (
+            f"{second.name} solved {second.solved:.1f} per run over {len(second.runs)} runs, more than "
+            f"{best.name}'s {best.solved:.1f}, so it runs a third time"
+        )
+        return second.name, second.next_seed(), why
+    return None
+
+
+def best(entries: dict[str, VariantEntry], nodes: list[core.Node]) -> Contender | None:
+    """The next round's parent, i.e. the best harness with 2+ runs in the lineage of the newest round"""
+    batch = newest_round(entries=entries)
+    if not batch:
+        return None
+    root = tree.lineage(name=batch[0].parent_node, nodes=nodes)[0]
+    # every harness in the lineage counts, earlier parents too, so a round with no winner keeps the current parent
+    mine = lineage_entries(root=root, entries=entries, nodes=nodes)
+    pool = [contender(name="baseline", root=root, nodes=nodes)] + [
+        contender(name=name, root=root, nodes=nodes, parent=entry.parent_node) for name, entry in mine.items()
+    ]
+    settled = [c for c in pool if len(c.runs) >= 2 and c.eligible]
+    return min(settled, key=lambda c: (-c.solved, c.tokens), default=None)

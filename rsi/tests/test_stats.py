@@ -22,7 +22,7 @@ def _run(name: str, passed: set[str], tasks: list[str]) -> core.Node:
 
 
 def test_one_run_each_is_mcnemars_test() -> None:
-    # 5 fixed and 3 broken: +2 tasks, se sqrt(8), z 0.71
+    # 5 fixed and 3 broken, so the gain is +2 tasks, se is sqrt(8) and z is 0.71
     tasks = [f"t{i}" for i in range(38)]
     both = set(tasks[:17])
     parent = _run(name="parent", passed=both | {"t20", "t21", "t22"}, tasks=tasks)
@@ -39,7 +39,7 @@ def test_more_runs_shrink_the_error_and_settled_tasks_add_nothing() -> None:
     parent = [_run(name=f"p{i}", passed={"always"}, tasks=tasks) for i in range(3)]
     variant = [_run(name=f"v{i}", passed={"always", "flip"}, tasks=tasks) for i in range(3)]
     found = stats.evidence(variant=variant, reference=parent, tasks=tasks)
-    # only "flip" differs: 3/3 vs 0/3, pooled rate 1/2, times 6/5 for its 6 runs
+    # only "flip" differs (3/3 vs 0/3), so the pooled rate is 1/2 and the variance gets 6/5 for its 6 runs
     assert found.gain == 1 and found.se == pytest.approx((0.25 * 6 / 5 * (1 / 3 + 1 / 3)) ** 0.5)
     one = stats.evidence(variant=variant[:1], reference=parent, tasks=tasks)
     assert one.se > found.se and (one.variant_runs, one.reference_runs) == (1, 3)
@@ -57,6 +57,20 @@ def test_a_verdict_calls_z_2_either_way_beyond_noise() -> None:
     assert stats.verdict(z=2.0) == stats.verdict(z=8.5) == "better, beyond noise"
     assert stats.verdict(z=-2.0) == stats.verdict(z=-5.2) == "worse, beyond noise"
     assert stats.verdict(z=1.99) == stats.verdict(z=0.0) == stats.verdict(z=-1.99) == "within noise"
+
+
+def _kinds(zs: list[float]) -> dict[str, stats.Evidence]:
+    return {
+        f"kind-{i}": stats.Evidence(variant_runs=1, reference_runs=1, tasks=20, gain=z, se=1.0)
+        for i, z in enumerate(zs)
+    }
+
+
+def test_the_more_kinds_of_work_the_worse_one_has_to_look_to_count() -> None:
+    assert stats.worse_kinds(kinds=_kinds(zs=[-2.1])) == ["kind-0"]
+    # 5 kinds give 5 chances to look worse by luck, so each kind needs a lower z to count
+    assert stats.worse_kinds(kinds=_kinds(zs=[-2.3, 0.0, 1.0, 0.5, -2.7])) == ["kind-4"]
+    assert stats.worse_kinds(kinds={}) == []
 
 
 def test_a_gain_that_cancels_out_is_exactly_zero() -> None:

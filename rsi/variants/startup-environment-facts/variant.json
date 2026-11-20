@@ -1,7 +1,0 @@
-{
-  "title": "Tell the agent environment facts up front: python, tests, imports, net",
-  "what": "An extension probes the machine once at startup (~0.3 s) and adds a short <environment> section to the system prompt: the python in use and whether pytest is installed, the project's own test-runner script, whether `import <pkg>` loads the checkout or an installed copy (with a verified PYTHONPATH/sys.path fix), no network, no rg. When rg is missing, pi's 'ls, rg, find' rule says grep.",
-  "why": "The parent learns these by failing: 'No module named pytest' in 21/100 runs (sympy-20916 tried pytest twice before bin/test), 'rg: command not found' in 13 (pi's prompt recommends rg), pip/URL fetches in ~13, and in ~5 runs probes or the test runner imported an installed copy (django-7530 tested the egg, then patched it). These calls and their recovery turns cost ~5% of output tokens; shadowed imports verify the wrong code.",
-  "expect": "Right test command and import path on the first try; fewer failed setup calls and network attempts. Small token savings (a few %) on about half the tasks, fewer wrong-copy verifications, no added turns. Kicks in on every task; the acted record lists the facts stated.",
-  "reuses": []
-}

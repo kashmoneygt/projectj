@@ -19,7 +19,7 @@ CONTRACT = "contract-1"
 
 @pytest.fixture(autouse=True)
 def _restore_logging() -> Iterator[None]:
-    # node commands add log handlers, so restore the suite's afterwards
+    # node commands add log handlers, so put the suite's handlers back afterwards
     root = logging.getLogger()
     saved = list(root.handlers)
     saved_ids = {id(h) for h in saved}
@@ -39,7 +39,7 @@ def _parent_node() -> core.Node:
         harness="pi",
         harness_version="1.3.0",
         model=core.ModelSpec(name="gemma-4-12b", source="path:/tmp/x.gguf", model_id="m"),
-        budget=core.Budget(),
+        budget=core.Budget(max_calls=100),
         tasks=1,
         seed=1,
     )
@@ -161,7 +161,7 @@ def test_variants_generate_needs_a_scored_parent(
 
 def _ready_to_generate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, found: generation.Round | Exception
-) -> list[int]:
+) -> list[tuple[str, int, str]]:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     parent = _parent_node()
     parent.total = 1
@@ -171,7 +171,7 @@ def _ready_to_generate(
     monkeypatch.setattr(
         cli.models, "teacher", lambda name: core.TeacherSpec(name=name, agent="copilot", model="m", effort="max")
     )
-    asked: list[int] = []
+    asked: list[tuple[str, int, str]] = []
 
     def generate(
         record: core.Node,
@@ -180,8 +180,9 @@ def _ready_to_generate(
         endpoint: core.ModelEndpoint,
         sessions: int,
         timeout_s: int,
+        round_id: str,
     ) -> generation.Round:
-        asked.append(sessions)
+        asked.append((record.name, sessions, round_id))
         if isinstance(found, Exception):
             raise found
         return found
@@ -202,7 +203,87 @@ def test_variants_generate_runs_the_sessions_asked_for(tmp_path: Path, monkeypat
     assert _invoke(args=command).exit_code == 0
     assert _invoke(args=[*command, "--sessions", "2"]).exit_code == 0
     assert _invoke(args=[*command, "--sessions", "0"]).exit_code == 2
-    assert asked == [generation.SESSIONS, 2]
+    assert [(name, sessions) for name, sessions, _ in asked] == [("t-node", generation.SESSIONS), ("t-node", 2)]
+
+
+def test_variants_generate_without_a_parent_starts_the_next_round_from_the_best_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    made = variants.tree_register(name="v", parent="baseline", parent_node="t-node", card=_card(title="V"), diff="+")
+    asked = _ready_to_generate(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        found=generation.Round(out=tmp_path / "round", registered=[made]),
+    )
+    rerun = _parent_node().model_copy(update={"name": "t-node-v", "parent": "t-node", "variant": "v", "total": 1})
+    runs.write_node(node=rerun)
+    monkeypatch.setattr(cli.variants, "best", lambda entries, nodes: variants.Contender(name="v", runs=[rerun]))
+    monkeypatch.setattr(cli.variants, "next_run", lambda entries, nodes: ("v", 43, "v had the best first run"))
+    with pytest.raises(typer.Exit):
+        cli.variants_generate(parent="", teacher="opus", sessions=generation.SESSIONS, timeout=1)
+    assert "isn't narrowed down yet" in caplog.text and asked == []
+    monkeypatch.setattr(cli.variants, "next_run", lambda entries, nodes: None)
+    cli.variants_generate(parent="", teacher="opus", sessions=generation.SESSIONS, timeout=1)
+    assert [(name, sessions) for name, sessions, _ in asked] == [("t-node-v", generation.SESSIONS)]
+
+
+def test_variants_next_prints_only_the_run_that_is_due(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    runs.write_node(node=_parent_node())
+    variants.tree_register(name="v", parent="baseline", parent_node="t-node", card=_card(title="V"), diff="+")
+    monkeypatch.setattr(cli.variants, "next_run", lambda entries, nodes: ("v", 43, "v had the best first run"))
+    assert _invoke(args=["variants", "next"]).stdout == "run --variant v --probe --seed 43\n"
+    # the baseline has no variant to name, so its run names the lineage's model, benchmark and harness
+    monkeypatch.setattr(cli.variants, "next_run", lambda entries, nodes: ("baseline", 45, "the round's parent"))
+    assert _invoke(args=["variants", "next"]).stdout == (
+        "run --model gemma-4-12b --benchmark swebench-verified --harness pi --probe --seed 45\n"
+    )
+    monkeypatch.setattr(cli.variants, "next_run", lambda entries, nodes: None)
+    monkeypatch.setattr(cli.variants, "best", lambda entries, nodes: None)
+    assert _invoke(args=["variants", "next"]).stdout == ""
+
+
+def test_variants_finish_makes_each_due_run_until_the_round_is_narrowed_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    runs.write_node(node=_parent_node())
+    variants.tree_register(name="a", parent="baseline", parent_node="t-node", card=_card(title="A"), diff="+")
+    due = [("baseline", 42), ("a", 42), ("a", 43)]
+    made: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli.variants, "next_run", lambda entries, nodes: (*due[len(made)], "why") if len(made) < len(due) else None
+    )
+
+    def run(variant: str, model: str, benchmark: str, harness_name: str, probe: bool, seed: int) -> None:
+        made.append(
+            {
+                "variant": variant,
+                "model": model,
+                "benchmark": benchmark,
+                "harness_name": harness_name,
+                "probe": probe,
+                "seed": seed,
+            }
+        )
+
+    monkeypatch.setattr(cli, "run", run)
+    monkeypatch.setattr(cli.variants, "best", lambda entries, nodes: None)
+    cli.variants_finish()
+    baseline = {"variant": "", "model": "gemma-4-12b", "benchmark": "swebench-verified", "harness_name": "pi"}
+    variant = {"variant": "a", "model": "", "benchmark": "", "harness_name": ""}
+    assert made == [
+        {**baseline, "probe": True, "seed": 42},
+        {**variant, "probe": True, "seed": 42},
+        {**variant, "probe": True, "seed": 43},
+    ]
+    # a run that is still due after it ran would loop forever, so the round stops
+    monkeypatch.setattr(cli.variants, "next_run", lambda entries, nodes: ("a", 44, "why"))
+    with pytest.raises(typer.Exit):
+        cli.variants_finish()
+    assert made[3:] == [{**variant, "probe": True, "seed": 44}]
+    assert "a's run with seed 44 is still due after it ran" in caplog.text
 
 
 def test_variants_generate_needs_the_lineages_probe_set(
@@ -221,7 +302,7 @@ def test_variants_generate_needs_the_lineages_probe_set(
     [
         (generation.Round(out=Path("round"), registered=[]), "no variant was registered"),
         (generation.TeacherUnavailable("session 1 failed before doing any work"), "before doing any work"),
-        # the model stopped answering, so the variant's question check says nothing about it
+        # the model stopped answering, so the question check can't judge the variant
         (harness.CheckUnavailable("the javascript question couldn't run: pi got no response"), "pi got no response"),
     ],
 )
@@ -262,7 +343,7 @@ def test_make_node_records_what_made_its_runs(tmp_path: Path, monkeypatch: pytes
         model="gemma-4-12b",
         tasks=1,
         seed=1,
-        timeout=3600,
+        budget=core.Budget(),
         backend=backend,
         variant="tight-loop",
         parent="t-node",
@@ -282,7 +363,7 @@ def test_make_node_records_what_made_its_runs(tmp_path: Path, monkeypatch: pytes
         model="gemma-4-12b",
         tasks=1,
         seed=1,
-        timeout=3600,
+        budget=core.Budget(),
         backend=backend,
     )
     assert baseline.variant_digest == "" and baseline.contract == CONTRACT
@@ -331,7 +412,7 @@ def _successor(tmp_path: Path, name: str, outcomes: list[bool], variant: str | N
         harness="pi",
         harness_version="1.3.0",
         model=core.ModelSpec(name="gemma-4-12b", source="path:/tmp/x.gguf", model_id="m"),
-        budget=core.Budget(),
+        budget=core.Budget(max_calls=100),
         tasks=4,
         seed=1,
         server=SERVER,
@@ -344,12 +425,12 @@ def _successor(tmp_path: Path, name: str, outcomes: list[bool], variant: str | N
 
 
 def _one_repo(node: core.Node) -> dict[str, str]:
-    """Every task of node in the same repo"""
+    """Map every task of node to the same repo"""
     return dict.fromkeys(node.runs, "r")
 
 
 def _made_up_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let the benchmark take a test's made-up task ids, all in one repo"""
+    """Make the benchmark accept made-up task ids, all in one repo"""
 
     def by_ids(ids: list[str]) -> list[core.Instance]:
         return [core.Instance(instance_id=i, repo="r", image="img", workdir="/testbed", task="p") for i in ids]
@@ -507,7 +588,8 @@ class _FlakyGrader:
         instances_dir: Path,
     ) -> dict[str, bool]:
         self.places.append(cwd)
-        graded = {"a__b-1": True, "c__d-2": False}
+        # the grader can pass what an errored run left behind too
+        graded = {"a__b-1": True, "c__d-2": True}
         return graded if len(self.places) <= self.fails else graded | {"e__f-3": True}
 
 
@@ -527,8 +609,8 @@ def test_scoring_grades_a_failed_evaluation_once_more(
     scored = runs.read_node(name="t-node")
     scratch = paths.node_dir(name="t-node") / "scoring"
     assert grader.places == [scratch, scratch]
-    # an errored task counts as unresolved until the run is finished again
     assert "count as unresolved until you finish the run with the same `rsi run` command: c__d-2" in caplog.text
+    assert scored.runs["c__d-2"].resolved is False
     if fails == 1:
         assert (scored.resolved, scored.total) == (2, 3) and not scratch.exists()
     else:
@@ -577,7 +659,7 @@ def test_finishing_a_run_rejects_changed_model_settings(tmp_path: Path, monkeypa
     result = _invoke(args=[*args, "--tasks", "1", "--seed", "1"])
     assert result.exit_code == 1
     assert "was run under different settings (not the same model settings: " in result.output
-    # the port doesn't count
+    # a different port doesn't make the settings differ
     assert '"ctx": 4096' in result.output and '"port"' not in result.output
 
 
@@ -659,6 +741,37 @@ def test_running_a_run_again_finishes_it_in_place(
     }
     # the old score doesn't cover the task that ran again, so the node waits for scoring
     assert (finished.total, finished.resolved) == (0, 0)
+
+
+def test_a_run_gives_its_tasks_that_ended_in_an_error_one_more_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RSI_ROOT", str(tmp_path))
+    _copy_models_toml(root=tmp_path)
+    broken = core.TaskRun(instance_id="c__d-2", status="error", error="docker went away")
+    h = _FakeHarness(outcomes={"c__d-2": broken, "e__f-3": broken.model_copy(update={"instance_id": "e__f-3"})})
+    _fake_world(monkeypatch=monkeypatch, h=h)
+    scores: list[str] = []
+    monkeypatch.setattr(cli, "score_node", lambda name, workers, clone_tasks: scores.append(name))
+    monkeypatch.setattr(cli.benchmarks, "get", lambda name: _FakeBench(ids=["a__b-1", "c__d-2", "e__f-3"]))
+    run = h.run
+
+    def heal(ctx: harness.RunContext) -> core.TaskRun:
+        found = run(ctx=ctx)
+        if ctx.instance.instance_id == "c__d-2":
+            h.outcomes.pop("c__d-2", None)  # c__d-2 works the second time, e__f-3 keeps failing
+        return found
+
+    monkeypatch.setattr(h, "run", heal)
+    args = ["run", "--model", "gemma-4-12b", "--benchmark", "swebench-verified", "--tasks", "3", "--seed", "1"]
+    assert _invoke(args=args).exit_code == 0
+    assert sorted(h.ran) == ["a__b-1", "c__d-2", "c__d-2", "e__f-3", "e__f-3"] and len(scores) == 1
+    finished = runs.read_node(name=scores[0])
+    assert {iid: run.status for iid, run in finished.runs.items()} == {
+        "a__b-1": "ok",
+        "c__d-2": "ok",
+        "e__f-3": "error",
+    }
 
 
 def test_a_scored_run_runs_again_only_under_another_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -840,7 +953,7 @@ def test_make_node_rejects_overlong_name(caplog: pytest.LogCaptureFixture) -> No
             model="gemma-4-12b",
             tasks=10,
             seed=42,
-            timeout=3600,
+            budget=core.Budget(),
             backend=_FakeBackend(),
         )
     assert "under 200" in caplog.text
@@ -921,7 +1034,7 @@ def test_compare_pools_two_sets_of_runs_on_the_tasks_they_share(
 def _lineage(
     monkeypatch: pytest.MonkeyPatch, backend: _FakeBackend | None = None, h: _FakeHarness | None = None
 ) -> tuple[core.Node, list[str]]:
-    monkeypatch.setattr(runs, "PROBE_SUCCESSES", 1)
+    monkeypatch.setattr(runs, "PROBE_TASKS", 5)
     _copy_models_toml(root=paths.rsi_root())
     _fake_world(monkeypatch=monkeypatch, backend=backend, h=h)
     now = {"model": models.get(name="gemma-4-12b"), "dataset": benchmarks.get(name="swebench-verified").dataset}
@@ -930,7 +1043,7 @@ def _lineage(
     root.runs = {iid: core.TaskRun(instance_id=iid, status="ok", resolved=i >= 4) for i, iid in enumerate(tasks)}
     root.task_ids, root.tasks, root.total, root.resolved = tasks, 6, 6, 2
     runs.write_node(node=root)
-    return root, runs.write_probe(root=root, nodes=[root], repos=_one_repo(node=root))
+    return root, runs.write_probe(root=root, nodes=[root], repos=_one_repo(node=root), kinds={})
 
 
 def _probe_node(root: core.Node, probe: list[str], node: str, variant: str, seed: int) -> None:
@@ -1011,14 +1124,14 @@ def test_a_baseline_probe_run_is_made_from_the_one_root_with_a_probe_set(
     runs.write_node(node=unprobed)
     other = root.model_copy(update={"name": "other-model", "model": root.model.model_copy(update={"name": "qwen"})})
     runs.write_node(node=other)
-    runs.write_probe(root=other, nodes=[other], repos=_one_repo(node=other))
+    runs.write_probe(root=other, nodes=[other], repos=_one_repo(node=other), kinds={})
     args = ["run", "--model", "gemma-4-12b", "--benchmark", "swebench-verified", "--probe", "--no-score"]
     result = _invoke(args=[*args, "--seed", "43"])
     assert result.exit_code == 0
     made = runs.read_node(name=f"gemma-4-12b--pi--swebench-verified--baseline--{len(probe)}t--s43")
     assert (made.parent, made.variant, made.tasks) == ("t-node", "", len(probe))
     assert started.ran == [(made.name, probe)] and started.scored == []
-    runs.write_probe(root=unprobed, nodes=[unprobed], repos=_one_repo(node=unprobed))
+    runs.write_probe(root=unprobed, nodes=[unprobed], repos=_one_repo(node=unprobed), kinds={})
     result = _invoke(args=[*args, "--seed", "44"])
     assert result.exit_code == 1
     assert "and more than one (t-node, unprobed) of gemma-4-12b on swebench-verified has one" in result.output
@@ -1038,7 +1151,7 @@ def test_a_baseline_probe_run_leaves_out_roots_made_with_another_request(
     asked = root.dataset.model_copy(update={"request": "{task}"})
     older = root.model_copy(update={"name": "older", "seed": 2, "dataset": asked})
     runs.write_node(node=older)
-    runs.write_probe(root=older, nodes=[older], repos=_one_repo(node=older))
+    runs.write_probe(root=older, nodes=[older], repos=_one_repo(node=older), kinds={})
     args = ["run", "--model", "gemma-4-12b", "--benchmark", "swebench-verified", "--probe", "--no-score"]
     assert _invoke(args=[*args, "--seed", "43"]).exit_code == 0
     assert runs.read_node(name=started.ran[0][0]).parent == root.name
@@ -1064,7 +1177,7 @@ def test_a_run_is_not_spent_when_it_would_not_compare(
     if changed == "files":
         (package / "SYSTEM.md").write_text("Edited after its first run.\n")
     timeout = ["--timeout", "1800"] if changed == "timeout" else []
-    # the model the run asks for, not its parent's
+    # with --model, the run uses that model instead of the parent's
     model = ["--model", "qwen-3.8-27b"] if changed == "model" else []
     result = _invoke(args=["run", "--variant", "next", "--probe", "--seed", "2", *timeout, *model])
     used = "qwen-3.8-27b" if changed == "model" else "gemma-4-12b"

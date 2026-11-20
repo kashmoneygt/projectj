@@ -193,7 +193,7 @@ def test_profile_counts_the_observables() -> None:
     change = tree.behavior_change(
         before=p, after=tree.profile(node=_scored(name="m", parent=None, variant="", outcomes={"a": True}, created=1.0))
     )
-    # what didn't move is left out
+    # metrics that didn't change are left out
     assert change.startswith("runs ending cut at the output cap 1→0, timeouts/errors 1→0")
     assert "runs that changed no file" not in change
     assert "thinking share 75%→0%" in change and change.endswith("minutes/task 2.0→0.0")

@@ -8,7 +8,7 @@ import urllib.request
 
 from rsi import core, models
 
-# per-request defaults that would override models.toml
+# drop these splash env vars on start, since their per-request defaults would override models.toml
 REQUEST_DEFAULT_VARS = ("SPLASH_DEFAULT_REASONING_EFFORT", "SPLASH_THINKING_TOKEN_BUDGET", "SPLASH_THINKING_END_TEXT")
 
 
@@ -23,7 +23,7 @@ def find_splash_bin() -> str:
 
 
 def splash_ref(source: str) -> str:
-    # splash resolves OWNER/REPO[:VARIANT] on HF
+    # splash looks up OWNER/REPO[:VARIANT] on Hugging Face
     if not source.startswith("splash:"):
         raise ValueError(f"splash backend needs a 'splash:OWNER/REPO[:VARIANT]' source, got {source!r}")
     ref = source.removeprefix("splash:")
@@ -33,7 +33,7 @@ def splash_ref(source: str) -> str:
 
 
 class SplashServer(models.LocalServer):
-    """The Qwen 3.5/3.6/3.8 families on MLX, with speculative decoding"""
+    """Serves the Qwen 3.5/3.6/3.8 families on MLX, with speculative decoding"""
 
     program = "splash"
     ready_path = "/ready"
@@ -48,11 +48,11 @@ class SplashServer(models.LocalServer):
             "serve",
             "--model",
             self.ref,
-            # never fetch new weights, templates or drafts
+            # never download weights, templates or draft models
             "--offline",
             "--port",
             str(self.spec.port),
-            # the name containers call it by
+            # containers reach the host machine as host.docker.internal
             "--allowed-host",
             "host.docker.internal",
             "--max-context",
@@ -71,7 +71,7 @@ class SplashServer(models.LocalServer):
         if self.is_running() or self._starting():
             return
         env = {key: value for key, value in os.environ.items() if key not in REQUEST_DEFAULT_VARS}
-        # own session, so stop() can kill the whole process tree
+        # start in a new session so stop() can kill the whole process tree
         self._launch(args=self._cmd(), env=env, new_session=True)
 
     def wait_ready(self, timeout: float = 900.0) -> None:
@@ -83,7 +83,7 @@ class SplashServer(models.LocalServer):
             return json.loads(resp.read())
 
     def _check_window(self) -> None:
-        # --max-context and --max-memory can only lower the window splash picks, so check it
+        # splash picks its own context window, and --max-context/--max-memory can only lower it, so check it matches ctx
         window = self._status(timeout=5).get("maximum_context_tokens")
         if window != self.spec.ctx:
             self.stop()

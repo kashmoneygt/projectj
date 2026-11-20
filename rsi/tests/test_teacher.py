@@ -126,7 +126,7 @@ def test_copilot_runs_locked_to_its_container_with_the_users_login(
     assert seen["env"]["COPILOT_HOME"] == str(tmp_path / "teacher-home") and seen["own_group"]
     server = json.loads((out / "mcp.json").read_text())["mcpServers"]["container"]
     assert server["args"][:2] == [copilot.container_mcp.__file__, "rsi-teacher-x"] and server["timeout"] > 3_600_000
-    # the session's deadline, so the tools can say how much time is left
+    # the MCP server gets the session deadline, so the tools can say how much time is left
     assert abs(float(server["args"][2]) - (time.time() + 60)) < 30
     home = json.loads((tmp_path / "teacher-home" / "config.json").read_text())
     assert home == {**{k: login[k] for k in ("loggedInUsers", "lastLoggedInUser")}, "trustedFolders": [command[2]]}
@@ -274,8 +274,8 @@ def test_the_mcp_server_answers_every_request(
 
 
 def _try_variant(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    """try_variant.py, which imports check_variant from its own folder"""
-    monkeypatch.syspath_prepend(paths.harnesses_dir() / "pi")  # python3 does this for a script it runs
+    """Load try_variant.py, which imports check_variant from its own folder"""
+    monkeypatch.syspath_prepend(paths.harnesses_dir() / "pi")  # python3 puts a script's own folder on sys.path
     return folders.module(root=paths.harnesses_dir(), name="pi", file="try_variant.py")
 
 
@@ -296,7 +296,7 @@ def test_try_variant_sums_up_a_run(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             },
         },
         {"type": "entry_appended", "entry": {"type": "custom_message", "customType": "guard", "content": "Check it."}},
-        # pi.sendMessage's messages come as messages, not entries
+        # messages from pi.sendMessage arrive as message_end events, not entries
         {
             "type": "message_end",
             "message": {"role": "custom", "customType": "nudge", "content": [{"type": "text", "text": "Run it."}]},
@@ -356,7 +356,7 @@ def test_the_question_check_says_how_the_package_got_in_the_way(
     assert problems(records=[], failed="pi got no response from the model") == [
         "pi got no response from the model, though the model answers a plain request"
     ]
-    # an answer the package made the agent go on from still counts, even if the next request failed
+    # still flag a package that made the agent go on after it answered, even if the next request failed
     failed = {"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "x"}}
     assert problems(records=[read, answer, failed], failed="pi's last request failed (x)") == [
         "the agent answered, and the package made it go on"
@@ -365,12 +365,12 @@ def test_the_question_check_says_how_the_package_got_in_the_way(
     assert problems(records=[read, answer], diff=diff) == [
         "the run changed src/cart.js, though the question needed no change"
     ]
-    # a stray edit a hook then rightly acts on shows both, and the second try tells them apart
+    # a stray edit that a hook rightly acts on shows both problems, and a second try shows whether it was chance
     assert problems(records=[read, answer, read, answer], diff=diff) == [
         "the agent answered, and the package made it go on",
         "the run changed src/cart.js, though the question needed no change",
     ]
-    # a response that quotes an update event is still read
+    # a response that quotes an update event isn't skipped as an update
     quoted = _response(stop="stop", text='It prints {"type":"message_update"} lines.')
     assert problems(records=[read, quoted]) == []
 
@@ -404,7 +404,7 @@ def test_a_run_without_an_answer_from_the_model_says_nothing_about_the_package(
         (["down", "edited"], 2, 2),
         (["edited", "down"], 2, 2),
         (["down", "pushy"], 2, 2),
-        # pi got no answer while the model answered a plain request, so the package may have broken pi's requests
+        # pi got no answer but a plain request to the model worked, so the package may have broken pi's requests
         (["broke", "broke"], 1, 2),
         (["broke", "clean"], 0, 2),
         (["broke", "down"], 2, 2),
@@ -451,7 +451,7 @@ def test_the_question_is_asked_again_only_while_the_outcome_could_be_chance(
 
 
 def test_try_variant_stops_pi_when_it_is_stopped(tmp_path: Path) -> None:
-    # the bash tool's timeout sends SIGTERM to try-variant's process group, which pi isn't in
+    # the bash tool's timeout sends SIGTERM to try-variant's process group, but pi runs in its own group
     pi = folders.module(root=paths.harnesses_dir(), name="pi", file="harness.py", kind="harness")
     fake = tmp_path / "bin" / "pi"
     fake.parent.mkdir()
@@ -469,7 +469,7 @@ def test_try_variant_stops_pi_when_it_is_stopped(tmp_path: Path) -> None:
         f"try_variant.TRIES = Path({str(tmp_path / 'tries')!r})\n"
         f"sys.exit(try_variant.main(argv={argv!r}))\n"
     )
-    # PYTHONPATH stands in for the script's own folder, which python3 puts on the path in the container
+    # in the container python3 puts the script's own folder on sys.path, so PYTHONPATH does that here
     env = {**os.environ, "PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}", "PYTHONPATH": str(pi.PI_DIR)}
     proc = subprocess.Popen([sys.executable, "-c", script], env=env, stderr=subprocess.DEVNULL)
     started = time.monotonic()

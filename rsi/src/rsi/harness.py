@@ -5,7 +5,11 @@ from typing import Protocol
 
 from rsi import core, folders, paths, views
 
-TASK_FILE = "task.md"  # where every run's folder keeps the task message the agent got
+TASK_FILE = "task.md"  # the task message the agent got, saved in each run folder
+VERIFIER_DIR = "verifier"  # subfolder of a run folder for the grader's logs, copied out of the task's container
+GRADING_FILE = "grading.json"  # result of grading in the task's container, e.g. exit code and whether it timed out
+# where the agent's final answer goes in the task's container after the run, for graders that check an answer
+REPLY_FILE = "/logs/agent/response.txt"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -19,19 +23,24 @@ class RunContext:
 
 
 class CheckUnavailable(Exception):
-    """A check couldn't run (the model or docker failed), so it says nothing about the variant"""
+    """Raised when a check couldn't run (e.g. the model or Docker failed), so it says nothing about the variant"""
 
 
 class Harness(Protocol):
     name: str
     version: str
     package_dir: Path  # the baseline package
-    doc: Path  # how to write a variant (the teacher's harness.md)
-    protocol_terms: tuple[str, ...]  # words about how runs are judged and where the runner puts things
+    doc: Path  # guide to writing a variant, which the teacher reads as harness.md
+    protocol_terms: tuple[str, ...]  # words about grading and the runner's paths, banned from files the agent reads
 
     def prepare(self, instances: list[core.Instance]) -> None: ...
     def run(self, ctx: RunContext) -> core.TaskRun:
-        """Run one task after the instance's setup commands, saving its message as TASK_FILE in ctx.out_dir"""
+        """Run one task after its setup commands, and save the task message as TASK_FILE in ctx.out_dir"""
+        # if the task has a verifier, grade it in the task's container once the agent is done. Write the agent's final
+        # answer to REPLY_FILE first, and save the grader's logs in ctx.out_dir/VERIFIER_DIR
+
+    def check_grader(self, *, instance: core.Instance, out_dir: Path, solve: bool) -> None:
+        """Run the task's grader after its reference solution (if solve) or after doing nothing, same as in a run"""
 
     def contract(self) -> str:
         """Hash of what every run gets besides the variant"""
@@ -40,10 +49,10 @@ class Harness(Protocol):
         """Check if a variant logs when it kicks in, so we can count how often it did"""
 
     def run_files(self, *, instance_dir: Path) -> dict[str, Path]:
-        """The files of a run the teacher reads, by the name it sees them under (nothing that says if it passed)"""
+        """Run files the teacher reads, keyed by the name the teacher sees, with nothing that says if the run passed"""
 
     def trajectory(self, *, instance_dir: Path) -> views.Trajectory:
-        """The run as the viewer shows it, read again while it's going"""
+        """The run as the viewer shows it, also called on a run that's still going"""
 
     def system_context(self, *, instance_dir: Path) -> str:
         """The run's system prompt and tool definitions, or "" if not saved"""
@@ -58,15 +67,16 @@ class Harness(Protocol):
         name: str,
         terms: tuple[str, ...],
     ) -> AbstractContextManager[str]:
-        """Start the teacher's container: workspace at /work (read-only), out_dir at /out, check-variant, try-variant"""
+        """Start the teacher's container with check-variant and try-variant, and yield its name"""
+        # workspace is mounted read-only at /work, and out_dir at /out
 
     def validate_variant(self, *, variant: Path, out_dir: Path, terms: tuple[str, ...]) -> list[str]:
-        """A variant package's problems (the log goes in out_dir)"""
+        """Check a variant package and return its problems, saving the check's log in out_dir"""
 
     def question_problems(
         self, *, variant: Path, out_dir: Path, model: core.ModelSpec, endpoint: core.ModelEndpoint
     ) -> list[str]:
-        """How the variant gets in the way of a question that needs no change (CheckUnavailable if it can't ask)"""
+        """Problems the variant causes on a question that needs no change (raises CheckUnavailable if it can't ask)"""
 
     def cleanup(self) -> None:
         """Stop whatever is still running after an interrupt"""

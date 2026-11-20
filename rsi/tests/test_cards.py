@@ -27,7 +27,7 @@ def test_problems_say_what_a_card_is_missing() -> None:
     assert cards.problems(text="title: t\nwhat: w\n")[0].startswith("variant.json isn't valid JSON")
     assert cards.problems(text="[]") == ["variant.json should hold one JSON object"]
     assert cards.problems(text="[" * 100_000)[0].startswith("variant.json isn't valid JSON")
-    # a card cut short at the time limit doesn't say enough, so the variant isn't run
+    # a card left half-written at the time limit is incomplete, so the variant isn't run
     draft = {"title": "a time limit", "what": "", "why": 3}
     assert cards.problems(text=json.dumps(draft)) == [
         'variant.json needs "what", as text',
@@ -53,7 +53,7 @@ def test_check_and_read(tmp_path: Path) -> None:
 
 
 def test_runs_alone_as_the_card_check_in_the_teacher_container(tmp_path: Path) -> None:
-    # -I -S hides site-packages, like the teacher's container
+    # -I -S hides site-packages, like in the teacher's container where rsi isn't installed
     def run(package: Path) -> subprocess.CompletedProcess[str]:
         command = [sys.executable, "-I", "-S", cards.__file__, str(package)]
         return subprocess.run(command, capture_output=True, text=True, check=False)

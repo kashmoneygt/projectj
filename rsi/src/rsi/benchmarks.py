@@ -1,5 +1,5 @@
+import hashlib
 import math
-import random
 from pathlib import Path
 from typing import Protocol
 
@@ -13,8 +13,8 @@ class Benchmark(Protocol):
 
     name: str
     dataset: core.DatasetSpec
-    protocol_terms: tuple[str, ...]  # words for the benchmark, banned from files the agent reads
-    work: str  # what its tasks are, in a few words for the teacher that don't give the benchmark away
+    protocol_terms: tuple[str, ...]  # words that give the benchmark away, banned from variant files the agent reads
+    work: str  # a few words on what the tasks are, for the teacher's prompt, without giving the benchmark away
 
     def ensure_assets(self, clone: bool) -> None: ...
     def select(self, tasks: int, seed: int) -> list[core.Instance]: ...
@@ -31,10 +31,10 @@ class Benchmark(Protocol):
         node_dir: Path,
         instances_dir: Path,
     ) -> dict[str, bool]:
-        """Grade each task, leaving out failed gradings for a second call in the same cwd"""
+        """Grade each task, leaving out failed gradings so a second call in the same cwd can retry them"""
 
     def verdict(self, task_dir: Path) -> views.Verdict | None:
-        """How a task was judged, from what scoring left in its folder (None before scoring)"""
+        """How a task was graded, read from the files grading left in its folder (None if there's no result)"""
 
     def gold(self, instance_id: str, run_id: str, cwd: Path) -> None: ...
 
@@ -44,9 +44,9 @@ def rows(spec: core.DatasetSpec) -> list[dict]:
 
 
 def spread(ids: list[str], repos: dict[str, str], count: int, seed: int) -> list[str]:
-    """A seeded sample of count tasks, each repo's share by the square root of its size so none crowds out the rest"""
-    shuffled = ids[:]
-    random.Random(seed).shuffle(shuffled)
+    """Pick count tasks by seed, weighting repos by sqrt(task count) so big repos don't crowd out small ones"""
+    # order by a hash of the seed and task id, so dropping a task doesn't reshuffle the others
+    shuffled = sorted(ids, key=lambda iid: hashlib.sha256(f"{seed}:{iid}".encode()).digest())
     if count >= len(shuffled):
         return shuffled
     by_repo: dict[str, list[str]] = {}
@@ -56,7 +56,7 @@ def spread(ids: list[str], repos: dict[str, str], count: int, seed: int) -> list
     shares = {repo: count * weight / sum(weights.values()) for repo, weight in weights.items()}
     taken = {repo: min(int(share), len(by_repo[repo])) for repo, share in shares.items()}
     while sum(taken.values()) < count:
-        # the rest go to the repos furthest under their share, among those with tasks left
+        # give each leftover pick to the repo furthest below its share that still has tasks left
         repo = max((r for r in by_repo if taken[r] < len(by_repo[r])), key=lambda r: shares[r] - taken[r])
         taken[repo] += 1
     picked = {iid for repo, found in by_repo.items() for iid in found[: taken[repo]]}
@@ -64,7 +64,7 @@ def spread(ids: list[str], repos: dict[str, str], count: int, seed: int) -> list
 
 
 def banned_terms(benchmark: Benchmark) -> tuple[str, ...]:
-    """Words a variant can't put in front of the agent, which are the benchmark's own and how its task message starts"""
+    """Words a variant can't show the agent, i.e. the benchmark's terms and the start of every task message"""
     lead = benchmark.dataset.lead.strip()
     return benchmark.protocol_terms + ((lead,) if lead else ())
 

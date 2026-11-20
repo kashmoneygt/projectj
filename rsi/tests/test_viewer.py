@@ -355,6 +355,10 @@ def test_classify_ordering() -> None:
     assert viewer._classify(run=err, judged=None) == ("err", "error: boom")
     empty = core.TaskRun(instance_id="a", status="ok", seconds=1.0, resolved=False)
     assert viewer._classify(run=empty, judged=None)[0] == "warn"
+    # a task graded in its own container can pass with no diff, or after running out of time
+    assert viewer._classify(run=empty, judged=judged) == ("ok", "resolved")
+    late = core.TaskRun(instance_id="a", status="timeout", seconds=1.0, resolved=True)
+    assert viewer._classify(run=late, judged=judged) == ("ok", "resolved")
 
 
 def test_save_puts_the_viewer_and_every_answer_it_asks_for_in_one_file(

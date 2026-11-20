@@ -12,7 +12,7 @@ def _basis(variant_runs: int, reference_runs: int, reference: str, tasks: int) -
 
 @dataclasses.dataclass(frozen=True)
 class Evidence:
-    """Solves vs the parent on the same tasks: gain per run and its standard error"""
+    """Gain in tasks solved per run vs the parent on the same tasks, with its standard error"""
 
     variant_runs: int
     reference_runs: int
@@ -22,7 +22,7 @@ class Evidence:
 
     @property
     def z(self) -> float:
-        # se is 0 only when gain is 0 too
+        # se is 0 only if all runs got the same result on each task, and then gain is 0 too
         return self.gain / self.se if self.se else 0.0
 
     def line(self, reference: str = "the parent") -> str:
@@ -34,7 +34,7 @@ class Evidence:
 
 @dataclasses.dataclass(frozen=True)
 class TokenEvidence:
-    """Output tokens vs the parent on the same tasks: mean log saving and its standard error"""
+    """Output tokens saved vs the parent on the same tasks, as a mean log ratio with its standard error"""
 
     variant_runs: int
     reference_runs: int
@@ -44,7 +44,7 @@ class TokenEvidence:
 
     @property
     def z(self) -> float:
-        return self.saving / self.se if self.se else 0.0  # 0 with fewer than 2 tasks or no spread
+        return self.saving / self.se if self.se else 0.0  # se is 0 with fewer than 2 tasks or no spread
 
     def line(self, reference: str = "the parent") -> str:
         basis = _basis(
@@ -54,7 +54,7 @@ class TokenEvidence:
 
 
 def evidence(variant: list[core.Node], reference: list[core.Node], tasks: list[str]) -> Evidence:
-    """Paired per-task test of pass rates (McNemar's test with one run a side)"""
+    """Paired per-task test of pass rates (McNemar's test when each side has one run)"""
     gain = Fraction(0)  # exact, so gains that cancel out sum to 0
     variance = 0.0
     counted = 0
@@ -78,7 +78,7 @@ def evidence(variant: list[core.Node], reference: list[core.Node], tasks: list[s
 
 
 def token_evidence(variant: list[core.Node], reference: list[core.Node], tasks: list[str]) -> TokenEvidence:
-    """Paired per-task test of log output tokens, over tasks every run finished"""
+    """Paired per-task test of log output tokens, skipping tasks where any run errored or had no output tokens"""
     diffs: list[float] = []
     for task in tasks:
         v = [n.runs[task] for n in variant if task in n.runs]
@@ -98,7 +98,15 @@ def _mean_log_tokens(runs: list[core.TaskRun]) -> float:
     return statistics.fmean(math.log(run.metrics.output_tokens) for run in runs)
 
 
-NOISE_Z = 2.0  # a no-better variant reaches it ~2% of the time (the best of four ~9%)
+NOISE_Z = 2.0  # a variant that's no better reaches this ~2% of the time, or ~7% for the best of 3 such variants
+
+
+def worse_kinds(kinds: dict[str, Evidence]) -> list[str]:
+    """The kinds of work a harness does worse at, beyond noise"""
+    # Bonferroni correction, since each kind is another chance to look worse by luck. Split the tail below -NOISE_Z
+    # between the kinds, so all kinds together give a false alarm about as often as 1 kind does at -NOISE_Z
+    bar = statistics.NormalDist().inv_cdf(statistics.NormalDist().cdf(-NOISE_Z) / max(len(kinds), 1))
+    return [kind for kind, found in kinds.items() if found.z <= bar]
 
 
 def verdict(z: float) -> str:

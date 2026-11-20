@@ -21,7 +21,7 @@ def task_set(node: core.Node) -> tuple[str, ...]:
 
 
 def _settings(node: core.Node) -> dict[str, object]:
-    """What a run's numbers depend on besides its server, contract and package (the port doesn't count)"""
+    """Settings that affect a run's results, other than its server, contract and package (the port doesn't)"""
     return {
         "model settings": node.model.model_dump(mode="json", exclude={"port"}),
         "harness": f"{node.harness} {node.harness_version}",
@@ -31,7 +31,7 @@ def _settings(node: core.Node) -> dict[str, object]:
 
 
 def _setup(node: core.Node) -> str:
-    """The settings runs must share to be compared, as one key"""
+    """The settings that runs must share to be compared, as one string"""
     return json.dumps(_settings(node=node), sort_keys=True)
 
 
@@ -40,7 +40,7 @@ def comparable(a: core.Node, b: core.Node) -> bool:
 
 
 def lineage(name: str, nodes: list[core.Node]) -> list[core.Node]:
-    """The node and its ancestors, root first (up to a missing parent)"""
+    """The node and its ancestors, root first, stopping where a parent isn't in nodes"""
     by_name = {n.name: n for n in nodes}
     chain: list[core.Node] = []
     current = by_name.get(name)
@@ -56,7 +56,7 @@ def members(root: str, nodes: list[core.Node]) -> list[core.Node]:
 
 
 def runs_of(variant: str, tasks: tuple[str, ...], like: core.Node, nodes: list[core.Node]) -> list[core.Node]:
-    """A variant's scored runs on exactly these tasks that compare with like"""
+    """A variant's scored runs on exactly these tasks, made with the same settings as like"""
     setup = _setup(node=like)
     return [
         n
@@ -71,7 +71,7 @@ def reference_runs(parent: core.Node, tasks: tuple[str, ...], nodes: list[core.N
 
 
 def reference_run(child: core.Node, nodes: list[core.Node]) -> core.Node | None:
-    """The latest reference run, for one-line comparisons (none if the child wasn't made like its parent)"""
+    """The newest run of the parent's harness, for one-line comparisons (None if the child ran with other settings)"""
     parent = next((n for n in nodes if n.name == child.parent), None)
     if parent is None or not comparable(a=child, b=parent):
         return None
@@ -108,7 +108,7 @@ def made_differently(compared: list[core.Node], packages: list[list[core.Node]])
 class Profile:
     """How a node's runs behaved, apart from the score"""
 
-    capped: int  # runs whose last request hit the output cap
+    capped: int  # runs where the last request hit the output cap
     empty: int  # runs that changed no file
     stopped: int  # runs that timed out or errored
     requests: float  # mean per task
@@ -135,7 +135,7 @@ def profile(node: core.Node) -> Profile:
 
 
 def behavior_change(before: Profile, after: Profile) -> str:
-    """How behavior changed from the reference's runs to the child's, leaving out what didn't move"""
+    """How behavior changed from before (the reference run) to after (the child), skipping stats that didn't change"""
     pairs = [
         ("runs ending cut at the output cap", f"{before.capped}", f"{after.capped}"),
         ("runs that changed no file", f"{before.empty}", f"{after.empty}"),
@@ -149,7 +149,7 @@ def behavior_change(before: Profile, after: Profile) -> str:
 
 
 def render_tree(nodes: list[core.Node], model_filter: str = "") -> str:
-    """One line per node with its score"""
+    """Draw the node tree, one line per node with its score"""
     shown = sorted((n for n in nodes if n.model.name.startswith(model_filter)), key=lambda n: n.created)
     names = {n.name for n in shown}
     children: dict[str | None, list[core.Node]] = {}

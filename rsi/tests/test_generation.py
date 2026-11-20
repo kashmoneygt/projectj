@@ -33,14 +33,21 @@ def _card(title: str, what: str = "w", reuses: tuple[str, ...] = ()) -> str:
 
 
 def _hide(record: core.Node, task: str = "z__z-9") -> None:
-    """Hide a task from the teacher, since a lineage is staged only once it hides some"""
+    """Write the probe set as the root's tasks plus `task`, and hide `task` from the teacher"""
+    runs.probe_path(root=record).write_text("\n".join(sorted({*record.runs, task})) + "\n")
     runs.hidden_path(root=record).write_text(f"# hidden from the teacher\n{task}\n")
+
+
+def _alias(task: str) -> str:
+    return generation.task_alias(task=task, kind="")
 
 
 def test_stage_holds_the_raw_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     record = _parent_node()
+    record.kinds = {"a__b-1": "bug fixes", "c__d-2": "data analysis"}
     record.runs["a__b-1"].metrics = core.TaskMetrics(requests=2, output_tokens=4000, stop_reason="stop")
+    record.runs["c__d-2"].error = "container rsi-c__d-2 went away"
     runs.write_node(node=record)
     _hide(record=record)
     for iid in record.runs:
@@ -50,7 +57,7 @@ def test_stage_holds_the_raw_evidence(tmp_path: Path, monkeypatch: pytest.Monkey
         (folder / "metrics.jsonl").write_text('{"type": "context"}\n')
         (folder / "events.jsonl").write_text("{}\n")
         (folder / "result.json").write_text('{"resolved": true}\n')
-        # the run's container could leave links that lead to the score, or nowhere
+        # the agent could leave symlinks to the score (result.json) or to a missing file
         (folder / "session" / "x.jsonl").symlink_to(folder / "result.json")
         (folder / "session" / "y.jsonl").symlink_to(folder / "missing")
     again = record.model_copy(update={"name": "again", "parent": "t-node", "created": record.created + 1})
@@ -61,17 +68,23 @@ def test_stage_holds_the_raw_evidence(tmp_path: Path, monkeypatch: pytest.Monkey
     assert (out / "parent" / "package.json").is_file() and not (out / "parent" / cards.FILE).exists()
     first = json.loads((out / "runs" / "parent" / "1" / "run.json").read_text())
     assert (first["model"]["name"], first["model"]["ctx"]) == ("qwen-3.8-27b", record.model.ctx)
-    assert first["tasks"]["a__b-1"] == {
+    # task ids name the benchmark, so the teacher sees each task as its kind of work and a hash
+    fix, data = (generation.task_alias(task=iid, kind=record.kinds[iid]) for iid in ("a__b-1", "c__d-2"))
+    assert re.fullmatch(r"bug-fixes-[0-9a-f]{8}", fix) and data.startswith("data-analysis-")
+    assert list(first["tasks"]) == [fix, data]
+    assert first["tasks"][fix] == {
         "status": "ok",
         "seconds": 60.0,
         "patch": "+fix\n",
         "error": None,
         "metrics": record.runs["a__b-1"].metrics.model_dump(),
     }
-    # pi's own record of the session and the metrics go along, but nothing that says whether a run passed
-    task = out / "runs" / "parent" / "1" / "a__b-1"
+    assert first["tasks"][data]["error"] == f"container rsi-{data} went away"
+    # stage copies pi's session log and the metrics, but nothing that says whether the run passed
+    task = out / "runs" / "parent" / "1" / fix
     assert sorted(p.name for p in task.iterdir()) == ["metrics.jsonl", "session.jsonl"]
-    assert list(json.loads((out / "runs" / "parent" / "2" / "run.json").read_text())["tasks"]) == ["a__b-1"]
+    assert list(json.loads((out / "runs" / "parent" / "2" / "run.json").read_text())["tasks"]) == [fix]
+    assert not [p for p in out.rglob("*") if "a__b-1" in p.name or "c__d-2" in p.name]
     with pytest.raises(FileExistsError):
         generation.stage(record=record, h=pi, dest=out, nodes=[record])
 
@@ -94,14 +107,14 @@ def test_the_parents_runs_are_every_run_of_its_harness_in_the_lineage_oldest_fir
         return node
 
     older = repeat(name="older", created=1.0, statuses={"a__b-1": "error", "c__d-2": "ok"})
-    # a task the root didn't run, like a held-out one, stays out
+    # x__y-7 isn't one of the root's tasks (e.g. a held-out task), so it stays out
     newer = repeat(name="newer", created=2.0, statuses={"a__b-1": "ok", "x__y-7": "ok"})
-    # not scored, which the teacher doesn't need
+    # leave newer unscored, since the teacher doesn't need scores
     newer.total, newer.resolved = 0, 0
     other = repeat(name="other", created=4.0, statuses={"a__b-1": "ok", "c__d-2": "ok"}, variant=str(tmp_path / "v"))
-    # a run that started a lineage of its own isn't one of this lineage's
+    # a run with no parent starts its own lineage, so it isn't in this one
     apart = repeat(name="apart", created=5.0, statuses={"a__b-1": "ok"}).model_copy(update={"parent": None})
-    # and a run on none of the root's tasks shows nothing
+    # a run on none of the root's tasks has nothing to show, so it gets no folder
     elsewhere = repeat(name="elsewhere", created=6.0, statuses={"x__y-8": "ok"})
     out = generation.stage(
         record=record,
@@ -110,19 +123,26 @@ def test_the_parents_runs_are_every_run_of_its_harness_in_the_lineage_oldest_fir
         nodes=[record, older, newer, other, apart, elsewhere],
     )
     staged = [json.loads((out / "runs" / "parent" / str(k) / "run.json").read_text()) for k in (1, 2, 3)]
-    assert [run["tasks"]["a__b-1"]["status"] for run in staged] == ["error", "ok", "ok"]
-    assert [sorted(run["tasks"]) for run in staged] == [["a__b-1", "c__d-2"], ["a__b-1"], ["a__b-1", "c__d-2"]]
-    # another harness's run isn't one of the parent's
+    ab, cd = _alias(task="a__b-1"), _alias(task="c__d-2")
+    assert [run["tasks"][ab]["status"] for run in staged] == ["error", "ok", "ok"]
+    assert [sorted(run["tasks"]) for run in staged] == [sorted([ab, cd]), [ab], sorted([ab, cd])]
+    # other ran a different variant, so it isn't one of the parent's runs
     assert not (out / "runs" / "parent" / "4").exists()
 
 
-def test_the_teacher_never_sees_a_task_the_lineage_hides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_teacher_sees_only_the_probe_tasks_the_lineage_doesnt_hide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     record = _parent_node()
     record.runs["e__f-3"] = core.TaskRun(instance_id="e__f-3", status="ok", resolved=True)
-    record.total, record.resolved = 3, 2
+    # g__h-4 isn't in the probe set. The probe picks as many solved tasks as unsolved ones, so showing the tasks it
+    # skipped would hint at how they went
+    record.runs["g__h-4"] = core.TaskRun(instance_id="g__h-4", status="ok")
+    record.total, record.resolved = 4, 2
     runs.write_node(node=record)
     _hide(record=record, task="a__b-1")
+    runs.probe_path(root=record).write_text("a__b-1\nc__d-2\ne__f-3\n")
     again = record.model_copy(update={"name": "again", "parent": "t-node", "created": 2.0})
     again.runs = {
         iid: core.TaskRun(instance_id=iid, status="ok", resolved=not run.resolved) for iid, run in record.runs.items()
@@ -132,24 +152,24 @@ def test_the_teacher_never_sees_a_task_the_lineage_hides(tmp_path: Path, monkeyp
             (paths.instances_dir(node_name=node.name) / iid).mkdir(parents=True)
             (paths.instances_dir(node_name=node.name) / iid / "session.jsonl").write_text(f'{{"task": "{iid}"}}\n')
     out = generation.stage(record=record, h=_FakeHarness(), dest=tmp_path / "stage", nodes=[record, again])
-    assert sorted(p.relative_to(out / "runs").as_posix() for p in (out / "runs").rglob("*.jsonl")) == [
-        "parent/1/c__d-2/session.jsonl",
-        "parent/1/e__f-3/session.jsonl",
-        "parent/2/c__d-2/session.jsonl",
-        "parent/2/e__f-3/session.jsonl",
-    ]
-    assert not [p for p in out.rglob("*") if p.is_file() and "a__b-1" in p.read_text(errors="replace")]
+    cd, ef = _alias(task="c__d-2"), _alias(task="e__f-3")
+    assert sorted(p.relative_to(out / "runs").as_posix() for p in (out / "runs").rglob("*.jsonl")) == sorted(
+        f"parent/{k}/{alias}/session.jsonl" for k in (1, 2) for alias in (cd, ef)
+    )
+    staged = [p.read_text(errors="replace") for p in out.rglob("*") if p.is_file()]
+    hidden = (_alias(task="a__b-1"), _alias(task="g__h-4"), "a__b-1", "g__h-4")
+    assert not [text for text in staged if any(name in text for name in hidden)]
 
 
 def test_stage_refuses_a_lineage_that_hides_nothing_yet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RSI_ROOT", str(tmp_path))
     record = _parent_node()
     runs.write_node(node=record)
-    # its probe set isn't written yet, so a task it hides later would be shown now
+    # no probe set yet, so stage refuses, since a task hidden later would already have been shown
     with pytest.raises(ValueError, match="no tasks hidden from the teacher yet"):
         generation.stage(record=record, h=_FakeHarness(), dest=tmp_path / "stage", nodes=[record])
     _hide(record=record)
-    # a missing root takes the list of hidden tasks with it
+    # the hidden list is kept with the root, so stage refuses when the root is missing
     record.parent = "archived-root"
     with pytest.raises(ValueError, match="no tasks hidden from the teacher yet"):
         generation.stage(record=record, h=_FakeHarness(), dest=tmp_path / "stage", nodes=[record])
@@ -172,7 +192,7 @@ def test_stage_shows_how_the_parents_children_ran_on_the_tasks_it_shows(
         outcomes={"a__b-1": True, "c__d-2": False},
         created=2.0,
     )
-    # a variant made from another run of the parent's harness is one of its children too
+    # a variant made from another run of the parent's variant (`again`) counts as a child too
     again = _scored_run(name="again", variant="", outcomes={"a__b-1": True, "c__d-2": True}, created=3.0)
     variants.tree_register(name="later", parent="baseline", parent_node="again", card=card, diff="+ c.md")
     later = _scored_run(
@@ -182,7 +202,7 @@ def test_stage_shows_how_the_parents_children_ran_on_the_tasks_it_shows(
     out = generation.stage(record=record, h=_FakeHarness(), dest=tmp_path / "stage", nodes=nodes)
     # idle hasn't run yet, so it gets no folder
     assert sorted(p.name for p in (out / "runs").iterdir()) == ["later", "parent", "tight"]
-    assert list(json.loads((out / "runs" / "tight" / "1" / "run.json").read_text())["tasks"]) == ["c__d-2"]
+    assert list(json.loads((out / "runs" / "tight" / "1" / "run.json").read_text())["tasks"]) == [_alias(task="c__d-2")]
     assert sorted(p.name for p in (out / "runs" / "parent").iterdir()) == ["1", "2"]
 
 
@@ -195,7 +215,7 @@ def test_the_teacher_never_sees_which_runs_passed(tmp_path: Path, monkeypatch: p
     flipped.runs = {iid: run.model_copy(update={"resolved": not run.resolved}) for iid, run in record.runs.items()}
     out = generation.stage(record=record, h=_FakeHarness(), dest=tmp_path / "stage", nodes=[record, flipped])
     staged = [p.read_text().lower() for p in (out / "runs").rglob("run.json")]
-    # nor the benchmark's name, which the node names and the dataset carry
+    # nor node names or the dataset name, since in real runs both give away the benchmark
     words = ("resolved", "score", "swebench", "t-node", "flipped")
     assert len(staged) == 2 and [word for text in staged for word in words if word in text] == []
 
@@ -217,11 +237,11 @@ def test_prompt_text_fills_every_placeholder() -> None:
     text = generation.prompt_text(
         harness_name="pi", model_name="qwen-3.8-27b", parent="tight-loop", work=work, timeout_s=3600
     )
-    # the teacher finds the parent and the variants made from it in tree.json by this name
+    # the teacher looks up the parent and its variants in tree.json by this name
     assert "(`tight-loop`)" in text
     assert re.findall(r"\{[a-z_]+\}", text) == [] and "qwen-3.8-27b" in text and "You have 60 minutes" in text
     assert "runs on issues from public Python projects." in text
-    # the benchmark, model and harness are swapped by name, so the prompt itself never names one
+    # the benchmark, model and harness are swappable, so the prompt file must not name any of them
     prompt = (paths.project_dir() / "prompts" / "variant-generator.md").read_text().lower()
     assert [word for word in ("python", "qwen", "swe-bench", "swebench", " pi ") if word in prompt] == []
 
@@ -266,7 +286,7 @@ class _FakeHarness:
 
     def validate_variant(self, *, variant: Path, out_dir: Path, terms: tuple[str, ...]) -> list[str]:
         check = folders.module(root=paths.harnesses_dir(), name="pi", file="check_variant.py")
-        return check.static_problems(package=variant, terms=terms)
+        return check.static_problems(package=variant, terms=tuple(check.hashed(term=term) for term in terms))
 
     def question_problems(
         self, *, variant: Path, out_dir: Path, model: core.ModelSpec, endpoint: core.ModelEndpoint
@@ -331,7 +351,7 @@ class _FakeTeacher:
             linked = produced / "linked"
             shutil.copytree(workspace / "parent", linked)
             (linked / "SYSTEM.md").symlink_to(paths.node_dir(name="t-node") / "node.json")
-            # symlinks to a file on the host machine, which the next session must not see
+            # card-link's card is a symlink to a secret on the host, which the next session must not see
             secret = paths.node_dir(name="t-node") / "host-secret.txt"
             secret.write_text("TOKEN=abc123\n")
             card_link = produced / "card-link"
@@ -432,6 +452,7 @@ def _generate(fake: _FakeHarness, sessions: int, monkeypatch: pytest.MonkeyPatch
         endpoint=core.ModelEndpoint(model_id="m", base_url="http://fake"),
         sessions=sessions,
         timeout_s=1,
+        round_id="r1",
     )
 
 
@@ -461,7 +482,7 @@ def test_generate_registers_good_candidates_and_rejects_the_rest(
     assert "exactly done" in (checks / "leaky" / generation.PROBLEMS).read_text()
     pushy = json.loads((checks / "pushy" / generation.PROBLEMS).read_text())
     assert pushy == ["the agent answered, and the package made it go on"]
-    # only a candidate that passes the other checks is asked the question
+    # only candidates that pass the other checks get asked the question
     assert fake.asked == [
         ("pushy", "session-1/pushy/question"),
         ("tight-loop", "session-1/tight-loop/question"),
@@ -473,7 +494,7 @@ def test_generate_registers_good_candidates_and_rejects_the_rest(
     assert runs.read_node(name="t-node").name == "t-node"
     assert not (paths.variants_dir() / "outside").exists()
     assert entry.reuses == []
-    # the next session sees what the one before it made, as the tree records it
+    # session 2 sees the variants session 1 made, as tree.json records them
     assert fake.trees[0] == {}
     seen = fake.trees[1]["tight-loop"]
     assert (seen["title"], seen["parent"], seen["outcome"], seen["kicked_in"]) == (
@@ -497,7 +518,7 @@ def test_generate_runs_its_sessions_in_turn(tmp_path: Path, monkeypatch: pytest.
     checks = found.out / "checks" / "session-2" / "bad-2" / generation.PROBLEMS
     assert "identical to the parent's" in checks.read_text()
     assert sorted(p.name for p in found.out.glob("session-*")) == [f"session-{n}" for n in range(1, 5)]
-    # each session sees the variants the sessions before it made
+    # each session sees the variants that earlier sessions made
     assert "late-3" not in fake.trees[2] and "late-3" in fake.trees[3]
 
 
@@ -572,6 +593,6 @@ def test_tree_shows_how_a_variant_did_but_not_which_runs_it_flipped(
     text = (stage_dir / "tree.json").read_text()
     shown = json.loads(text)["tight-loop"]
     assert (shown["what"], shown["why"], shown["outcome"]) == ("h", "23 of 37 failed runs", "no clear difference")
-    # node names give the benchmark away
+    # no node names, since they give away the benchmark
     assert "parent_node" not in shown and "t-node" not in text
     assert "a__b-1" not in text and "c__d-2" not in text

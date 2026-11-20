@@ -1,5 +1,5 @@
-import dataclasses
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,7 +27,7 @@ def test_pi_package_manifest() -> None:
     assert manifest["pi"]["extensions"] == ["extensions/*.ts"]
     assert sorted(p.name for p in h.package_dir.iterdir()) == ["package.json"]
     assert h.doc.is_file()
-    assert sorted(p.name for p in h.eval_dir.iterdir()) == ["metrics.ts"]
+    assert sorted(p.name for p in h.eval_dir.iterdir()) == ["budget.ts", "metrics.ts"]
     assert not (h.package_dir / "prompts").exists()
 
 
@@ -40,54 +40,79 @@ def test_pi_install_extensions(tmp_path: Path) -> None:
     assert (agent_dir / "extensions" / "metrics.ts").read_text() == "metrics"
 
 
-def test_pi_timeout_saves_the_diff_a_finished_run_gets() -> None:
-    calls: list[list[str]] = []
+def _patch_scripts(out: Path, snapshot: Path) -> tuple[str, str]:
+    """Scripts that record the workdir at the start and diff it at the end, writing to out instead of /out"""
+    start = pi.patch_start().replace("/out", str(out)).replace(pi.SNAPSHOT, str(snapshot))
+    return start, pi.capture_patch().replace("/out", str(out)).replace(pi.SNAPSHOT, str(snapshot))
 
-    class _Container:
-        def exec_run(self, cmd: list[str]) -> None:
-            calls.append(cmd)
 
-    pi._flush_partial_patch(container=_Container(), workdir="/testbed")
-    assert calls == [["bash", "-lc", pi.capture_patch(workdir="/testbed")]]
+def _repo(path: Path) -> list[str]:
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    (path / "a.py").write_text("x = 1\n")
+    subprocess.run([*git, "add", "-A"], cwd=path, check=True)
+    subprocess.run([*git, "commit", "-qm", "start"], cwd=path, check=True)
+    return git
 
 
 def test_pi_patch_keeps_new_and_binary_files(tmp_path: Path) -> None:
     repo, out = tmp_path / "testbed", tmp_path / "out"
     out.mkdir()
-    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / "a.py").write_text("x = 1\n")
-    subprocess.run([*git, "add", "-A"], cwd=repo, check=True)
-    subprocess.run([*git, "commit", "-qm", "start"], cwd=repo, check=True)
+    git = _repo(path=repo)
+    # the image build left an untracked file, which isn't the agent's change
+    (repo / "=0.9.0").write_text("")
     fresh = tmp_path / "fresh"
     shutil.copytree(repo, fresh)
-    script = pi.capture_patch(workdir=str(repo)).replace("/out", str(out))
-    subprocess.run(["bash", "-c", f"git -C {repo} rev-parse HEAD > {out}/orig-head\n{script}"], check=True)
+    start, capture = _patch_scripts(out=out, snapshot=tmp_path / "snapshot.git")
+    subprocess.run(["bash", "-c", start], cwd=repo, check=True)
+    assert (out / "patch-start").read_text().startswith("repo ")
+    subprocess.run(["bash", "-c", capture], cwd=repo, check=True)
     assert (out / "patch.diff").read_text() == ""
     (repo / "a.py").write_text("x = 2\n")
     (repo / "new.py").write_text("y = 1\n")
     (repo / "blob.bin").write_bytes(bytes(range(256)))
     subprocess.run([*git, "commit", "-qam", "the agent committed"], cwd=repo, check=True)
-    subprocess.run(["bash", "-c", script], check=True)
+    subprocess.run(["bash", "-c", capture], cwd=repo, check=True)
     subprocess.run(["git", "apply", str(out / "patch.diff")], cwd=fresh, check=True)
     assert (fresh / "a.py").read_text() == "x = 2\n" and (fresh / "new.py").read_text() == "y = 1\n"
     assert (fresh / "blob.bin").read_bytes() == bytes(range(256))
     assert not (out / pi.STAGING_FAILED).exists()
+    # capture leaves the repo's own git index as the agent left it, since grading may use it
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"], cwd=repo, capture_output=True, text=True, check=True
+    )
+    assert staged.stdout == ""
     (repo / "a.py").write_text("x = 3\n")
+    # an index.lock the agent left doesn't block the diff, since capture stages into its own index file
     (repo / ".git" / "index.lock").write_text("")
-    subprocess.run(["bash", "-c", script], check=False)
+    subprocess.run(["bash", "-c", capture], cwd=repo, check=True)
     assert "+x = 3" in (out / "patch.diff").read_text()
-    assert "index.lock" in (out / pi.STAGING_FAILED).read_text()
+    assert not (out / pi.STAGING_FAILED).exists()
+
+
+def test_pi_patch_of_a_folder_that_isnt_a_repo_leaves_it_without_one(tmp_path: Path) -> None:
+    folder, out, snapshot = tmp_path / "app", tmp_path / "out", tmp_path / "snapshot.git"
+    folder.mkdir()
+    out.mkdir()
+    (folder / "data.csv").write_text("a,b\n1,2\n")
+    start, capture = _patch_scripts(out=out, snapshot=snapshot)
+    subprocess.run(["bash", "-c", start], cwd=folder, check=True)
+    assert (out / "patch-start").read_text() == "snapshot HEAD\n"
+    (folder / "data.csv").write_text("a,b\n1,3\n")
+    (folder / "tool.py").write_text("print(1)\n")
+    subprocess.run(["bash", "-c", capture], cwd=folder, check=True)
+    patch = (out / "patch.diff").read_text()
+    assert "+1,3" in patch and "b/tool.py" in patch
+    assert sorted(p.name for p in folder.iterdir()) == ["data.csv", "tool.py"]
 
 
 def test_pi_patch_ignores_the_git_config_an_agent_sets(tmp_path: Path) -> None:
     repo, out = tmp_path / "testbed", tmp_path / "out"
     out.mkdir()
-    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / "a.py").write_text("x = 1\n")
-    subprocess.run([*git, "add", "-A"], cwd=repo, check=True)
-    subprocess.run([*git, "commit", "-qm", "start"], cwd=repo, check=True)
+    _repo(path=repo)
+    start, capture = _patch_scripts(out=out, snapshot=tmp_path / "snapshot.git")
+    subprocess.run(["bash", "-c", start], cwd=repo, check=True)
+    # then the agent sets up git hooks and config to run its own code or hide its changes
     ran = tmp_path / "ran"
     hook = repo / ".git" / "hooks" / "post-index-change"
     hook.write_text(f"#!/bin/sh\necho hook >> {ran}\n")
@@ -106,8 +131,7 @@ def test_pi_patch_ignores_the_git_config_an_agent_sets(tmp_path: Path) -> None:
         subprocess.run(["git", "config", key, value], cwd=repo, check=True)
     (repo / ".gitattributes").write_text("*.py diff=clean\n")
     (repo / "a.py").write_text("x = 2\n")
-    script = pi.capture_patch(workdir=str(repo)).replace("/out", str(out))
-    subprocess.run(["bash", "-c", f"git -C {repo} rev-parse HEAD > {out}/orig-head\n{script}"], check=True)
+    subprocess.run(["bash", "-c", capture], cwd=repo, check=True)
     patch = (out / "patch.diff").read_text()
     assert "-x = 1\n+x = 2\n" in patch and "all clean" not in patch
     assert not ran.exists()
@@ -117,10 +141,6 @@ def test_pi_patch_ignores_the_git_config_an_agent_sets(tmp_path: Path) -> None:
     assert "hook" in ran.read_text()
     plain = subprocess.run(["git", "diff", "--cached"], cwd=repo, capture_output=True, text=True, check=True)
     assert "all clean" in plain.stdout
-
-
-def test_pi_overlay_image_name() -> None:
-    assert pi.overlay_image(instance_id="django__django-11001") == f"rsi/pi-swe/django__django-11001:{pi.PI_VERSION}"
 
 
 def _endpoint() -> core.ModelEndpoint:
@@ -169,7 +189,7 @@ def test_pi_check_model() -> None:
     assert "thinking off" in pi.HARNESS.check_model(model=off)
 
 
-def test_pi_task_script_works_in_the_tasks_folder_and_never_names_the_task(tmp_path: Path) -> None:
+def test_pi_agent_script_never_names_the_task(tmp_path: Path) -> None:
     instance = core.Instance(
         instance_id="django__django-11001", repo="django/django", image="img", workdir="/work/repo", task="Fix it."
     )
@@ -177,14 +197,11 @@ def test_pi_task_script_works_in_the_tasks_folder_and_never_names_the_task(tmp_p
     ctx = harness.RunContext(
         instance=instance, out_dir=tmp_path, model=model, endpoint=_endpoint(), budget=core.Budget(timeout_s=60)
     )
-    script = pi._task_script(ctx=ctx)
-    assert script.startswith("set -u\ncd /work/repo\n") and "--session-id task " in script
-    assert "cd /work/repo && start=" in script
+    script = pi._agent_script(ctx=ctx)
+    # pi runs on its own node binary, and its bin folder goes last on PATH so the task's own tools come first
+    assert script.startswith(f'export PATH="$PATH:{pi.PI_HOME}/bin"\n{pi.PI_HOME}/bin/node {pi.PI_CLI} --print ')
+    assert f"< /out/{harness.TASK_FILE} > /out/events.jsonl" in script and "--session-id task " in script
     assert "django" not in script
-    set_up = ctx.instance.model_copy(update={"setup": "git config --global user.name dev\n"})
-    script = pi._task_script(ctx=dataclasses.replace(ctx, instance=set_up))
-    # the setup runs before HEAD is saved, so the patch has only the agent's changes
-    assert script.index("cd /work/repo\n") < script.index("user.name dev\n") < script.index("git rev-parse HEAD")
 
 
 def test_pi_copy_variant_resources(tmp_path: Path) -> None:
@@ -270,7 +287,7 @@ def test_pi_cleanup_kills_live_containers() -> None:
 
 
 class _CheckContainer:
-    """A check's container that ends the way a test says"""
+    """Fake check container that ends the way the test asks"""
 
     def __init__(self, ends: str, removed: list[bool]) -> None:
         self.ends = ends
@@ -321,7 +338,7 @@ class _CheckContainers:
         ("timeout", (-1, "problem: the question did not finish within 60 s")),
         ("unavailable", "the question couldn't run: pi got no response from the model"),
         ("docker", "the question couldn't run: docker: DockerException: the docker daemon isn't running"),
-        # a question check calls the model, so it mustn't keep going after ctrl-c
+        # a question check calls the model, so ctrl-c must stop it
         ("interrupt", "KeyboardInterrupt"),
     ],
 )
@@ -388,7 +405,7 @@ def test_pi_question_check_asks_each_question_until_one_has_problems(
     assert [question for question, _, _ in asked] == ["javascript", "python"]
     _, command, timeout_s = asked[0]
     assert "--tries=2" in command and "--timeout=540" in command and timeout_s == 2 * (540 + 120) + 120
-    # it stops at the first question with problems
+    # asking stops at the first question with problems
     printed["javascript"] = "problem: the agent never answered\n"
     asked.clear()
     assert ask() == ["javascript question: the agent never answered"]
@@ -425,7 +442,7 @@ def test_every_question_is_about_a_small_repo_that_needs_no_change() -> None:
         question = pi.QUESTIONS_DIR / name
         assert (question / "question.md").read_text().strip().endswith("?")
         assert (question / "repo" / "README.md").is_file()
-    # npm install leaves a committed lockfile as it is, so a reflexive install changes nothing
+    # npm install keeps a committed lockfile as is, so an agent that runs it out of habit changes nothing
     assert (pi.PRACTICE_QUESTION / "repo" / "package-lock.json").is_file()
 
 
@@ -433,6 +450,35 @@ def test_the_teacher_container_installs_both_helpers() -> None:
     assert "check_variant.py --terms /opt/rsi/terms.txt --manifest /opt/harness/package.json" in pi.CHECK_COMMAND
     assert "try_variant.py" in pi.TRY_COMMAND
     assert subprocess.run(["sh", "-n", "-c", pi.TRY_COMMAND], check=False).returncode == 0
+
+
+def test_check_variant_gets_the_banned_terms_hashed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mounted: list[str] = []
+
+    def run_check(
+        what: str,
+        name: str,
+        command: list[str],
+        volumes: dict[str, dict[str, str]],
+        network: str,
+        timeout_s: int,
+        log_path: Path,
+    ) -> tuple[int, str]:
+        mounted.append(
+            next(Path(source).read_text() for source, mount in volumes.items() if mount["bind"].endswith("terms.txt"))
+        )
+        return 0, "ok: fine\n"
+
+    monkeypatch.setattr(pi, "_run_check", run_check)
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "APPEND_SYSTEM.md").write_text("Work like on a Termigen task.\n")
+    assert pi.HARNESS.validate_variant(variant=package, out_dir=tmp_path / "check", terms=("termigen",)) == []
+    # the teacher's container holds the same file, so it mustn't name the benchmark, yet the check still finds it
+    (terms,) = mounted
+    assert "termigen" not in terms.lower()
+    found = pi.check.term_problems(package=package, terms=tuple(terms.splitlines()))
+    assert found == ["APPEND_SYSTEM.md names the workload or its protocol ('termigen')"]
 
 
 def test_records_activations_looks_for_the_acted_entry_in_code(tmp_path: Path) -> None:
@@ -444,3 +490,137 @@ def test_records_activations_looks_for_the_acted_entry_in_code(tmp_path: Path) -
     assert not pi.HARNESS.records_activations(package=package)
     (package / "extensions" / "gate.ts").write_text("pi.appendEntry(\n  'acted', { what: 'blocked a call' });\n")
     assert pi.HARNESS.records_activations(package=package)
+
+
+class _TaskContainer:
+    name = "rsi-task"
+
+    def __init__(self) -> None:
+        self.attrs = {"Config": {"WorkingDir": "/app"}, "NetworkSettings": {"Networks": {"net": {"IPAddress": "ip"}}}}
+
+    def reload(self) -> None:
+        pass
+
+    def exec_run(self, cmd: list[str], user: str = "") -> None:
+        pass
+
+
+def _record_task(monkeypatch: pytest.MonkeyPatch, setup_code: int = 0) -> list[str]:
+    """Record each part of a task run, in order, instead of running it in Docker"""
+    done: list[str] = []
+    monkeypatch.setattr(pi, "_start", lambda client, instance, network, volumes, name: _TaskContainer())
+    monkeypatch.setattr(pi, "_set_internet", lambda client, container, on: done.append(f"internet {on}"))
+    monkeypatch.setattr(pi, "_finish_container", lambda container: done.append("removed"))
+
+    def run(container: _TaskContainer, script: str, workdir: str, timeout_s: float) -> int:
+        part = "setup" if "setup.log" in script else "start" if "g init" in script else "diff"
+        done.append(f"{part} in {workdir}")
+        return setup_code if part == "setup" else 0
+
+    monkeypatch.setattr(pi, "_exec", run)
+
+    def verify(client: object, container: _TaskContainer, verifier: core.Verifier, workdir: str, out_dir: Path) -> None:
+        done.append(f"grade online={verifier.internet}")
+
+    monkeypatch.setattr(pi, "_verify", verify)
+    return done
+
+
+def _graded_instance() -> core.Instance:
+    return core.Instance(
+        instance_id="src.task",
+        repo="task",
+        image="img",
+        workdir="",
+        task="Build it.",
+        setup="bash setup.sh",
+        internet=False,
+        verifier=core.Verifier(tests="/host/tests", command="/tests/test.sh", internet=True),
+    )
+
+
+def test_a_task_is_worked_with_its_own_network_and_graded_where_it_was_worked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    done = _record_task(monkeypatch=monkeypatch)
+
+    def act(*, container: _TaskContainer, workdir: str) -> tuple[str, str | None]:
+        done.append(f"agent in {workdir}")
+        # the agent swaps result.json for a symlink out of the run folder, which the host would write through
+        (tmp_path / "result.json").symlink_to(tmp_path.parent / "elsewhere.json")
+        return "ok", None
+
+    found = pi.run_task(
+        client=None, instance=_graded_instance(), out_dir=tmp_path, network="net", volumes={}, act=act, name="n"
+    )
+    assert found[0] == "ok" and found[1] is None and found[3] == "ip"
+    assert done == [
+        "internet False",
+        "setup in /app",
+        "start in /app",
+        "agent in /app",
+        "diff in /app",
+        "grade online=True",
+        "removed",
+    ]
+    assert not (tmp_path / "result.json").is_symlink()
+
+
+def test_a_task_whose_setup_fails_never_reaches_the_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    done = _record_task(monkeypatch=monkeypatch, setup_code=2)
+    (tmp_path / "setup.log").write_text("pip: no such package\n")
+    status, error, _, _ = pi.run_task(
+        client=None,
+        instance=_graded_instance(),
+        out_dir=tmp_path,
+        network="net",
+        volumes={},
+        act=lambda *, container, workdir: ("ok", None),
+        name="n",
+    )
+    assert status == "error" and "setup exited 2: pip: no such package" in error
+    assert done[-1] == "removed" and not any(step.startswith(("agent", "grade")) for step in done)
+
+
+@pytest.mark.parametrize(
+    ("left", "code", "failed"),
+    [(["reward.txt"], 0, False), ([], 0, True), ([], None, False)],
+    ids=["graded", "left-no-reward", "ran-out-of-time"],
+)
+def test_grading_that_leaves_no_reward_fails_unless_it_ran_out_of_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left: list[str], code: int | None, failed: bool
+) -> None:
+    monkeypatch.setattr(pi, "_set_internet", lambda client, container, on: None)
+    monkeypatch.setattr(pi, "_put", lambda container, source, dest: None)
+    monkeypatch.setattr(pi, "_exec", lambda container, script, workdir, timeout_s, environment: code)
+
+    def fetch(container: _TaskContainer, source: str, dest: Path) -> None:
+        dest.mkdir()
+        (dest / "test-stdout.txt").write_text("collected 3 items\n")
+        for name in left:
+            (dest / name).write_text("1\n")
+
+    monkeypatch.setattr(pi, "_fetch", fetch)
+    verifier = core.Verifier(tests="/host/tests", command="/tests/test.sh")
+    why = pi._verify(client=None, container=_TaskContainer(), verifier=verifier, workdir="/app", out_dir=tmp_path)
+    assert (why is not None) == failed
+    if failed:
+        # the teacher sees the run's error, so the error must not say what the grader printed or checks for
+        assert why == "grading exited 0 without a result"
+    grading = json.loads((tmp_path / harness.GRADING_FILE).read_text())
+    assert grading["timed_out"] == (code is None) and grading["exit_code"] == code
+
+
+def test_only_files_stay_in_a_run_folder_the_host_reads_and_writes(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    (run / "verifier").mkdir(parents=True)
+    (run / "patch.diff").write_text("+x\n")
+    (run / "verifier" / "reward.txt").write_text("0\n")
+    (tmp_path / "planted").mkdir()
+    # symlinks the agent could leave to forge a result or reach host files, and a pipe that would block a read
+    (run / "pi.err").symlink_to(Path.home() / ".ssh" / "id_rsa")
+    (run / "verifier-2").symlink_to(tmp_path / "planted", target_is_directory=True)
+    os.mkfifo(run / "events.jsonl")
+    pi._only_files(folder=run)
+    left = sorted(p.relative_to(run).as_posix() for p in run.rglob("*"))
+    assert left == ["patch.diff", "verifier", "verifier/reward.txt"] and (tmp_path / "planted").is_dir()

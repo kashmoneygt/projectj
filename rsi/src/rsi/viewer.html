@@ -41,7 +41,7 @@ select{font:inherit;font-size:13px;padding:5px 8px;border-radius:8px;border:1px 
 background:var(--panel);color:var(--ink)}
 .empty{color:var(--muted);padding:40px 0;text-align:center}
 
-/* the tree */
+/* tree page */
 .lineage{margin:18px 0 28px}
 .tree,.tree ul{list-style:none;margin:0;padding:0}
 .tree ul{margin-left:22px;padding-left:22px;border-left:1.5px solid var(--line)}
@@ -162,7 +162,7 @@ cursor:pointer;color:var(--muted)}
 .toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:18px 0 6px}
 .toolbar h2{font-size:15px;margin:0;font-weight:620}
 
-/* rows */
+/* task and session rows */
 .row{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin:8px 0;overflow:hidden}
 .row>.head{display:grid;grid-template-columns:14px 1fr auto;gap:12px;align-items:center;padding:10px 14px;
 cursor:pointer;user-select:none}
@@ -312,7 +312,7 @@ const signedPct = (x) => {
   return (p > 0 ? '+' : p < 0 ? '−' : '') + Math.abs(p) + '%';
 };
 const pct = (a, b) => (b ? Math.round((100 * (a - b)) / b) : 0);
-// beyond noise either way, like stats.NOISE_Z
+// |z| >= 2 is beyond noise, same as stats.NOISE_Z
 const tone = (z) => (z >= 2 ? 'good' : z <= -2 ? 'bad' : '');
 const tokenNoise = (z) => (z >= 2 ? 'fewer beyond noise' : z <= -2 ? 'more beyond noise' : 'within noise');
 const when = (t) => new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit',
@@ -321,12 +321,12 @@ const fmtRound = (id) => {
   const m = id.match(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)/);
   return m ? when(new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5]).getTime() / 1000) : id;
 };
-// data-b names a block, so a refresh can open it again
+// data-b is the block's name, so restore() can reopen it after a refresh
 const details = (summary, inner) => '<details class="blk" data-b="' + esc(summary) + '"><summary>' + summary
   + '</summary>' + inner + '</details>';
 const blk = (summary, text) => details(summary, '<pre>' + esc(text) + '</pre>');
 
-// from the live server, or from this file when saved with `rsi view --save`
+// api() reads from the live server, or from the data `rsi view --save` embedded in this file
 const SAVED = (() => {
   const el = document.getElementById('saved');
   return el ? JSON.parse(el.textContent) : null;
@@ -344,7 +344,8 @@ async function api(path) {
   return r.json();
 }
 
-// #/ is the tree, #flips the tasks across runs, #node/<name>[/task/<iid> | /gen/<round>/<n>], #variant/<name>
+// URL hash routes - (1) #/ the tree, (2) #flips tasks across runs, (3) #node/<name> a run, plus /task/<iid> or
+// /gen/<round>/<n> to open a task or teacher session in it, (4) #variant/<name> a variant's card and diff
 let VIEW = null, DATA = null, LAST = null;
 function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent).filter(Boolean);
@@ -376,7 +377,7 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 document.addEventListener('keydown', (e) => {
-  // Esc goes up a level: closes an open diff or task, or goes back to the tree
+  // Esc goes up one level, i.e. closes the diff dialog or the open task or session, or goes back to the tree
   if (e.key !== 'Escape' || !VIEW || e.target.closest?.('input, select, textarea')) return;
   if ($('#dlg').open) $('#dlg').close();
   else if (VIEW.page === 'node' && VIEW.open) closeOpen();
@@ -431,7 +432,7 @@ function header(crumbs, sub) {
 }
 const tile = (label, value, sub, cls) => '<div class="tile"><div class="k">' + label + '</div><div class="v">' + value
   + '</div>' + (sub ? '<div class="s ' + (cls || '') + '">' + sub + '</div>' : '') + '</div>';
-// a run's status and dot when it isn't scored yet
+// dot class and score text for a run chip, showing progress until the run is scored
 const RUN_STATE = { running: 'running', scoring: 'scoring', stopped: 'stopped', unscored: 'stopped', done: 'done' };
 function runWhat(r) {
   if (r.total) return r.resolved + '/' + r.total;
@@ -445,7 +446,7 @@ const OUTCOME = { passed: 'passed', failed: 'failed', error: 'errored', timeout:
 const runChip = (r, label) => '<a class="run" href="#node/' + enc(r.name) + '" title="' + esc(r.name) + '">'
   + '<span class="dot ' + RUN_STATE[r.status] + '"></span>' + esc(label ?? r.label) + ' · ' + runWhat(r) + '</a>';
 
-// the tree
+// tree page
 function renderTree() {
   header([{ text: 'Tree' }], '');
   TIPS = [];
@@ -478,10 +479,11 @@ function lineageHtml(l) {
     + '</div></section>' + (graph || '<ul class="tree"><li>' + harnessItem(l.tree) + '</li></ul>') + '</section>';
 }
 
-// every harness on a number line of its score on the probe set, branching from the one it was made from
+// score graph - one row per harness, a dot at its mean score on the probe set, and a branch from its parent
 const PAD = 6; // % of the plot left clear at each end
 const waiting = (c) => (c.runs.length ? runWhat(c.runs[c.runs.length - 1]) : 'not run yet');
-// a branch from a lane at the top of a row down to the dot in its middle, in a box that stretches with the row
+// branch from the parent's lane at the top of a row down to the dot at mid-row. When it bends, it's drawn in a
+// nested svg with preserveAspectRatio="none" so it stretches with the row's height
 function branch(xp, xk, cls) {
   if (xp === xk) return '<line class="branch' + cls + '" x1="' + xp + '%" y1="0" x2="' + xp + '%" y2="50%"/>';
   const [a, b] = xk > xp ? [0, 100] : [100, 0];
@@ -492,7 +494,8 @@ function branch(xp, xk, cls) {
 // a round's id is the local time it started, like 20261029-194105
 const roundDay = (id) => new Date(+id.slice(0, 4), +id.slice(4, 6) - 1, +id.slice(6, 8))
   .toLocaleDateString([], { month: 'short', day: 'numeric' });
-// "~ a.ts (+1 -2), + b.json" as files, each new, deleted or with its lines added and removed
+// parse a diff summary like "~ a.ts (+1 -2), + b.json" into new (+), deleted (-) and changed (~) files, keeping
+// other parts like "+3 more" as text
 const changes = (summary) => summary.split(', ').map((part) => {
   const m = /^([+~-]) (.+?)(?: \(\+(\d+) -(\d+)\))?$/.exec(part);
   return m ? { op: m[1], path: m[2], added: +(m[3] ?? 0), removed: +(m[4] ?? 0) } : { text: part };
@@ -522,8 +525,8 @@ function scoreGraph(l) {
   };
   const root = node(l.tree, null);
   if (root.x == null) return '';
-  // a parent's variants and live teacher rounds come right after it under a header for each round they came from,
-  // and the next layer grows from promoted ones
+  // list the root, then its variants and live teacher rounds under one header per round, then do the same for
+  // each of those variants, depth first
   const rows = [{ n: root }];
   const grow = (n) => {
     const made = [...n.kids.map((k) => ({ n: k, parent: n, id: k.c.round })),
@@ -540,11 +543,13 @@ function scoreGraph(l) {
   const fit = [Math.max(0, Math.min(...scores) - 1), Math.min(of, Math.max(...scores) + 1)];
   const [lo, hi] = SCALE === 'full' ? [0, of] : fit;
   const X = (v) => +(PAD + ((v - lo) / (hi - lo)) * (100 - 2 * PAD)).toFixed(2);
-  // at most 7 labels so they fit a narrow plot, with a grid line between labels when they skip a step
+  // pick the smallest label step with at most 7 gaps so labels fit a narrow plot, and for even steps draw a grid
+  // line halfway between labels
   const step = [1, 2, 5, 10, 20, 50].find((s) => (hi - lo) / s <= 7), minor = step % 2 ? step : step / 2;
   const ticks = [];
   for (let t = Math.ceil(lo / minor) * minor; t <= hi; t += minor) ticks.push(t);
-  // each row draws its own piece of every lane, so a row can be as tall as its text
+  // a lane is the vertical line from a parent down to the last row made from it. Each row's svg draws its own
+  // piece of every lane, so rows can grow to fit their text
   const parents = [...new Set(rows.filter((r) => r.from && r.from.x != null).map((r) => r.from))];
   const lanes = parents.map((p) => {
     const kids = rows.flatMap((k, i) => (k.parent === p ? [i] : []));
@@ -624,7 +629,7 @@ function filesHtml(c) {
       + esc(f.path) + what + '</button>';
   }).join('');
 }
-// "37/51 + 36/51 = 36.5/51", then how it compares to its parent
+// right column, e.g. "37/51 + 36/51 = 36.5/51", then how the harness compares to its parent
 function scoresHtml(n, tips) {
   const c = n.c, st = c.standing, of = n.runs[0].total;
   const each = n.runs.map((r, k) => '<a href="#node/' + enc(r.name) + '" data-tip="' + tips[k] + '">' + r.resolved + '/'
@@ -675,10 +680,10 @@ function teacherRow(round, xp) {
   };
 }
 
-// a variant's diff, one file at a time: a preview on hover, all of it on click
+// show a variant's diff one file at a time, previewed on hover and opened in a dialog on click
 const DIFFS = new Map();
 let TIP_EL = null, MOUSE = { x: 0, y: 0 }, DIFF_OPENED = 0;
-// a unified diff's lines for each file, without the --- and +++ lines
+// split a unified diff into lines per file, leaving out the --- and +++ header lines
 function diffFiles(text) {
   const files = new Map(), lines = text.split('\n');
   let cur = null;
@@ -815,7 +820,7 @@ function teacherCard(r) {
     + r.registered + ' made so far</div></div></div>';
 }
 
-// a run
+// run page
 let FILTER = 'all', SORT = 'task';
 const FILTERS = {
   all: ['all', () => true],
@@ -848,7 +853,7 @@ function statusTag(n) {
   return '';
 }
 function nodeTiles(n) {
-  // this run's numbers next to the parent runs' mean on the same tasks
+  // this run's numbers next to the mean over runs of the parent's harness on the same tasks
   const p = n.profile, ref = n.reference, r = ref && ref.profile;
   const vs = (now, before, fmt, extra) => {
     if (before == null) return [extra || '', ''];
@@ -872,7 +877,7 @@ function nodeTiles(n) {
     + tile('Steps per task', p.requests.toFixed(0), ss, sc) + '</div>';
 }
 function troubles(n) {
-  // how its tasks went wrong, next to the parent's runs
+  // how many of this run's tasks went wrong in each way, next to the mean for runs of the parent's harness
   const p = n.profile, r = n.reference?.profile;
   const rows = [['timed out or errored', 'stopped'], ['no patch', 'empty'], ['ran out of context', 'capped'],
     ['requests off the fixed model settings', 'contract']];
@@ -882,7 +887,7 @@ function troubles(n) {
 }
 function relatedHtml(n) {
   const parts = [];
-  // a repeat of the parent's harness lists the parent among its runs
+  // skip "made from" when the parent is already listed under other runs of this harness
   if (n.parent && !n.harness_runs.some((r) => r.name === n.parent)) {
     parts.push('<span class="k">made from</span><a class="run" href="#node/' + enc(n.parent) + '">'
       + esc(n.parent_label) + '</a>');
@@ -1028,7 +1033,7 @@ $('#main').addEventListener('click', (e) => {
     more.textContent = task.classList.contains('clamp') ? 'Show the whole task' : 'Show less';
     return;
   }
-  // a click on a card opens its main link, unless it hit another link
+  // a click anywhere on a card follows its data-href, unless it was on a link inside the card
   const card = e.target.closest('[data-href]');
   if (card && !e.target.closest('a')) location.hash = card.dataset.href;
 });
@@ -1060,7 +1065,7 @@ function collapseAll() {
 function toggleRow(row) {
   const type = row.dataset.type, id = row.dataset.id;
   if (VIEW.open && VIEW.open.type === type && VIEW.open.id === id) { closeOpen(); return; }
-  // its own history entry, so Back closes it again
+  // push a history entry so the browser's Back button closes the row
   history.pushState({ opened: true }, '', '#node/' + enc(VIEW.name) + '/' + type + '/' + id.split('/').map(enc)
     .join('/'));
   collapseAll();
@@ -1071,7 +1076,7 @@ function toggleRow(row) {
   loadOpen(true).then(() => row.scrollIntoView({ block: 'start', behavior: 'smooth' }));
 }
 function closeOpen() {
-  if (history.state?.opened) { history.back(); return; }  // route() shows the run without it
+  if (history.state?.opened) { history.back(); return; }  // route() then redraws the run with the row closed
   const id = rowId(VIEW.open.type, VIEW.open.id);
   history.replaceState(null, '', '#node/' + enc(VIEW.name));
   collapseAll();
@@ -1080,7 +1085,7 @@ function closeOpen() {
   document.getElementById(id)?.scrollIntoView({ block: 'center' });
 }
 
-// the open trajectory
+// trajectory of the open task or teacher session
 let OPEN = null, OPEN_JSON = '';
 const MEMO = {};
 const openKey = () => VIEW.open.type + ':' + VIEW.open.id;
@@ -1112,7 +1117,7 @@ async function loadOpen(force) {
   body.innerHTML = trajHtml(d, openKey());
   restore(openKey());
 }
-// open folds, details and blocks, kept across refreshes and filter changes
+// remember which folds, detail chips and blocks are open, so they stay open across refreshes and filter changes
 function remember(chat) {
   if (!chat) return;
   MEMO[chat.dataset.key] = {
@@ -1221,7 +1226,7 @@ function trajHtml(d, key) {
       + (long ? ' clamp' : '') + '">' + esc(d.user) + '</div>'
       + (long ? '<button class="linkbtn more" data-more>Show the whole task</button>' : '');
   }
-  // quiet steps (no text, no edit) fold into one row
+  // fold consecutive quiet steps (no text, no edit or write, no cutoff, no error) into one collapsible row
   let fold = [];
   const flush = () => {
     if (!fold.length) return;
@@ -1288,7 +1293,7 @@ function trajHtml(d, key) {
   return h + '</div>';
 }
 function evalHtml(ev) {
-  // the benchmark's own checks, which the agent never saw, in its groups and words
+  // passed/total per group of the benchmark's checks (hidden from the agent), then failed checks and the grading log
   const row = (c) => '<tr><td>' + esc(c.label) + '</td><td>' + c.total + '</td><td class="'
     + (c.passed < c.total ? 'bad' : 'good') + '">' + c.passed + '</td></tr>';
   let h = ev.checks.some((c) => c.total) ? '<div class="blk"><table class="cmp"><tr><th>checks</th><th>total</th>'
@@ -1299,7 +1304,7 @@ function evalHtml(ev) {
   return h;
 }
 function telemetryHtml(d) {
-  // where a finished run's time went, then per-step timing (shown live too)
+  // time breakdown for a finished run, then a per-step timing table that also shows while the run is live
   const m = d.metrics;
   const spans = (texts) => '<div class="meta">' + texts.filter(Boolean).map((t) => '<span>' + esc(t) + '</span>')
     .join('') + '</div>';
@@ -1340,7 +1345,7 @@ function telemetryHtml(d) {
   return h;
 }
 
-// a variant that hasn't run yet
+// variant page, for a variant that hasn't run yet
 function renderVariant() {
   const v = DATA;
   header([{ text: 'Tree', href: '#' }, { text: v.name }], 'made from ' + v.parent_label);
@@ -1351,7 +1356,7 @@ function renderVariant() {
     + (v.nodes.length ? '<section class="panel"><h2>Runs</h2>' + runs.join('') + '</section>' : '');
 }
 
-// the tasks across runs
+// tasks across runs page
 function renderFlips() {
   header([{ text: 'Tree', href: '#' }, { text: 'Tasks across runs' }],
     'each task\'s result in every run on the same tasks, the tasks with mixed results first');
@@ -1359,7 +1364,7 @@ function renderFlips() {
   $('#main').innerHTML = DATA.groups.length ? DATA.groups.map(flipTable).join('') : empty;
 }
 function flipTable(g) {
-  // show how many tasks a run had if it ran more than these
+  // add a run's task count to its name if it ran more tasks than this table shows
   const name = (n) => n.variant + ' s' + n.seed + (n.tasks > g.tasks.length ? ' · ' + n.tasks + ' tasks' : '');
   const head = g.nodes.map((n) => '<th class="v"><a href="#node/' + enc(n.name) + '" title="' + esc(n.name) + '">'
     + esc(name(n)) + '</a></th>');

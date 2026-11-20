@@ -12,13 +12,13 @@ from rsi import folders, paths, teacher, views
 
 COPILOT = "copilot"
 container_mcp = folders.module(root=paths.teachers_dir(), name="copilot", file="container_mcp.py", kind="MCP server")
-# only the container's tools, since Copilot's own reach the host and the internet
+# allow only the container tools, since Copilot's built-in tools run on the host and can reach the internet
 TOOLS = ("container-bash", "container-read_file", "container-write_file", "container-edit_file")
-MCP_TIMEOUT_MS = 3_700_000  # a container command may take an hour (Copilot's default is 5 minutes)
-# a separate Copilot home, so the user's history, skills, plugins and MCP servers stay out (only the login is borrowed)
+MCP_TIMEOUT_MS = 3_700_000  # a container command can take up to an hour (Copilot's default is 5 min)
+# separate Copilot home, so the user's history, skills, plugins and MCP servers stay out (only the login is copied)
 HOME = Path.home() / ".cache" / "rsi" / "copilot"
-CLIP_CHARS = 6_000  # per tool call and result in the transcript
-# what kind of tool each container tool is, for the viewer (Copilot calls them <server>-<tool>)
+CLIP_CHARS = 6_000  # max chars per tool call and per result in the transcript
+# kind of each container tool for the viewer (Copilot names them <server>-<tool>)
 _KINDS = {"bash": "bash", "read_file": "read", "write_file": "write", "edit_file": "edit"}
 
 
@@ -34,7 +34,7 @@ class CopilotTeacher:
     ) -> teacher.TeacherRun:
         out_dir.mkdir(parents=True, exist_ok=True)
         cwd = _home()
-        # the tools end each result with the time left, since the teacher misreads the clock
+        # the container tools end each result with the time left, since the teacher misjudges how much time it has
         deadline = time.time() + timeout_s
         server = {
             "type": "local",
@@ -85,7 +85,7 @@ class CopilotTeacher:
                 status, error = "timeout", f"stopped after {timeout_s} s"
                 _stop(process=process)
             except BaseException:
-                _stop(process=process)  # it's in its own process group, so our interrupt doesn't reach it
+                _stop(process=process)  # copilot is in its own process group, so our interrupt doesn't reach it
                 raise
         if status == "error":
             tail = (out_dir / "copilot.err").read_text(errors="replace").strip()[-1_500:]
@@ -196,7 +196,7 @@ def _epoch_ms(stamp: object) -> float:
 
 
 def _keep_session_state(out_dir: Path, since: float) -> None:
-    """Move Copilot's own session record (which has compactions) into out_dir"""
+    """Move Copilot's own session record into out_dir, since it keeps the compaction summaries"""
     for folder in (HOME / "session-state").glob("*"):
         if folder.is_dir() and folder.stat().st_mtime >= since:
             (out_dir / "copilot-session").mkdir(exist_ok=True)
@@ -204,7 +204,7 @@ def _keep_session_state(out_dir: Path, since: float) -> None:
 
 
 def _home() -> Path:
-    """Copy the user's Copilot login into the teacher's home, so a new /login carries over"""
+    """Copy the user's Copilot login into the teacher's home on every run, so a new /login gets picked up"""
     cwd = HOME / "cwd"
     cwd.mkdir(parents=True, exist_ok=True)
     user_config = Path.home() / ".copilot" / "config.json"
@@ -232,7 +232,7 @@ def _stop(process: subprocess.Popen) -> None:
 
 
 def _events(path: Path) -> list[dict]:
-    """The session's events, without the streamed pieces each whole message repeats"""
+    """The session's events, minus the streamed deltas that each full message repeats"""
     if not path.is_file():
         return []
     out = []
@@ -247,7 +247,7 @@ def _events(path: Path) -> list[dict]:
 
 
 def _usage(out_dir: Path) -> tuple[int, int, str]:
-    """Model calls, output tokens and cost, from the usage file or the last checkpoint"""
+    """Model calls, output tokens and cost, from the usage file or else the last usage checkpoint"""
     events = _events(path=out_dir / "events.jsonl")
     calls = sum(1 for e in events if e.get("type") == "model.call_finished")
     usage_file = out_dir / "usage.json"

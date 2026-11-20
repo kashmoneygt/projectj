@@ -1,5 +1,5 @@
-// Renders every page of viewer.html in a stub DOM to catch runtime errors node --check misses, against a running
-// viewer or a file saved with `rsi view --save`.
+// Render every page of viewer.html in a stub DOM to catch runtime errors that node --check misses. Works against a
+// running viewer or a file saved with `rsi view --save`.
 // Usage: node tests/smoke_viewer_js.mjs [http://127.0.0.1:8765 | saved.html] [tasks per run, default 3]
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
@@ -57,9 +57,9 @@ sandbox.window = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], sandbox, { filename: "viewer.html" });
 if (saved && !data) throw new Error(`${source} has no saved answers`);
-// the page's own api(), live or from the saved file
+// call the page's own api(), which reads from the running viewer or the saved file
 const get = (path) => vm.runInContext(`api(${JSON.stringify(path)})`, sandbox);
-// a file saved with --node keeps only those runs' trajectories
+// a file saved with --node only has trajectories for those runs, so skip the rest
 const trajectory = (path) =>
     get(path).catch((error) => {
         if (saved && error.message === "not saved in this file") return null;
@@ -74,7 +74,7 @@ const render = (what, data, code, marker) => {
     checked += 1;
 };
 const tree = await get("/api/tree");
-// the graph needs probe runs, which a new lineage doesn't have yet
+// render the graph only if some lineage has scored probe runs, since a new lineage has none yet
 if (tree.lineages.some((lineage) => lineage.tree.runs.some((run) => run.probe && run.total))) {
     render("the tree as a graph", tree, "HOME = 'graph'; DATA = __data; renderTree()", 'class="sg"');
 }
@@ -86,7 +86,7 @@ const walk = (card) => {
     card.children.forEach(walk);
 };
 tree.lineages.forEach((lineage) => walk(lineage.tree));
-// each file the graph lists for a variant has its own part of the diff shown on hover
+// every file the graph lists for a variant must have its own part of the diff to show on hover
 for (const card of cards.filter((c) => c.changed)) {
     sandbox.__name = card.name;
     sandbox.__changed = card.changed;
