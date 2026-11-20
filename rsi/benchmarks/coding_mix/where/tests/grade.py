@@ -58,7 +58,9 @@ def main() -> None:
     mentioned = named(reply=reply, files=git(args=["ls-files"]))
     missing = [f for f in fixed if f not in mentioned]
     others = sorted(f for f in mentioned - set(fixed) if not TESTS.search(f))
-    edited = git(args=["status", "--porcelain", "--untracked-files=no"])
+    # only edits to code count, since an image's own setup can leave files like yarn.lock, go.mod or .gitmodules changed
+    status = git(args=["status", "--porcelain", "--untracked-files=no"])
+    edited = [line for line in status if not NOT_CODE.search(line[3:]) and not Path(line[3:]).name.startswith(".")]
     passed = bool(fixed) and not missing and len(others) <= OTHERS and not edited
     (LOGS / "reward.txt").write_text("1\n" if passed else "0\n")
     print(json.dumps({"fix": fixed, "missing": missing, "others": others, "edited": edited}, indent=2))

@@ -206,24 +206,27 @@ def test_an_answer_names_a_file_by_its_path_or_an_end_of_it_no_other_file_has() 
 @pytest.mark.parametrize(
     ("reply", "edited", "reward"),
     [
-        ("A fix goes in src/a.py, which b.py calls.", False, "1"),
-        ("A fix goes in src/a.py.", True, "0"),
-        ("It's somewhere in b.py or c.py.", False, "0"),
-        ("It's in src/a.py, b.py, c.py, d.py, e.py or f.py.", False, "0"),
+        ("A fix goes in src/a.py, which b.py calls.", "", "1"),
+        ("A fix goes in src/a.py.", "b.py", "0"),
+        # the image's own setup can leave files like these changed, which isn't the agent editing code
+        ("A fix goes in src/a.py.", "yarn.lock", "1"),
+        ("A fix goes in src/a.py.", ".gitmodules", "1"),
+        ("It's somewhere in b.py or c.py.", "", "0"),
+        ("It's in src/a.py, b.py, c.py, d.py, e.py or f.py.", "", "0"),
     ],
-    ids=["right", "edited", "wrong-file", "too-many-files"],
+    ids=["right", "edited", "lock-file-changed", "dotfile-changed", "wrong-file", "too-many-files"],
 )
-def test_an_answer_passes_when_it_names_the_fixs_files_and_few_others_and_nothing_changed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: str, edited: bool, reward: str
+def test_an_answer_passes_when_it_names_the_fixs_files_and_few_others_and_no_code_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: str, edited: str, reward: str
 ) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
-    for name in ("src/a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "README.md"):
+    for name in ("src/a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "README.md", "yarn.lock", ".gitmodules"):
         (repo / name).write_text("x = 1\n")
     for command in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]):
         subprocess.run(["git", *command], cwd=repo, check=True)
     if edited:
-        (repo / "b.py").write_text("x = 2\n")
+        (repo / edited).write_text("x = 2\n")
     (tmp_path / "reply.txt").write_text(reply)
     # README.md and package-lock.json in the fix don't count, so the answer only has to name src/a.py
     (tmp_path / "fix.patch").write_text(

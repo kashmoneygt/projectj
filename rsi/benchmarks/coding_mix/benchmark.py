@@ -53,13 +53,24 @@ WHERE = (
 
 # skip these repos because their tests need the network, run out of memory in our 6 GB Docker VM, or take too long
 UNRUNNABLE = {
+    "alteryx/woodwork": "tests fail even with the real fix",
     "aws-cloudformation/cfn-lint": "needs the network (DNS lookup)",
+    "chainguard-dev/apko": "a test fails even with the real fix",
+    "copier-org/copier": "a test fails even with the real fix",
     "google/jax": "out of memory",
     "jax-ml/jax": "out of memory",
     "jeremydaly/dynamodb-toolbox": "grading takes 20+ min",
+    "kubernetes-sigs/cloud-provider-azure": "tests don't run offline",
+    "microsoft/griffel": "a test fails even with the real fix",
     "modin-project/modin": "tests exit without running when offline",
+    "obsidian-tasks-group/obsidian-tasks": "a test fails even with the real fix",
+    "oclif/core": "out of memory",
+    "ony3000/prettier-plugin-classnames": "tests fail even with the real fix",
+    "peak/s5cmd": "tests fail even with the real fix",
     "projectevergreen/wcc": "needs the network",
     "pyccel/pyccel": "grading takes 10+ min",
+    "pypa/pipx": "needs the network (installs packages)",
+    "redocly/redocly-cli": "a test fails even with the real fix",
     "researchobject/ro-crate-py": "needs the network (downloads files)",
     "scikit-build/scikit-build-core": "needs the network (installs packages)",
     "tanstack/router": "out of memory",
@@ -97,16 +108,17 @@ def _issues() -> dict[str, list[str]]:
             or row["quality_flags"]
             or labels.get("code") != "A"
             or labels.get("intent_completeness") != "complete"
-            or labels.get("difficulty") not in ("easy", "medium")
         ):
             continue
         patch = row["patch"]
         code = [f for f in re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE) if not NOT_CODE.search(f)]
         lines = sum(line[:1] in "+-" and line[:3] not in ("+++", "---") for line in patch.splitlines() if line)
         categories = set(labels.get("pr_categories") or ())
-        if categories & FEATURES and not categories & BUGS and 1 <= len(code) <= 3 and lines <= 80:
+        # only multi-file changes, since the baseline solved ~90% of small ones and the difficulty labels don't predict
+        # which tasks it fails
+        if categories & FEATURES and not categories & BUGS and 3 <= len(code) <= 8 and 80 <= lines <= 400:
             picked["build"].append(row["instance_id"])
-        elif categories & BUGS and not categories & FEATURES and 1 <= len(code) <= 2 and lines <= 40:
+        elif categories & BUGS and not categories & FEATURES and 2 <= len(code) <= 5 and 30 <= lines <= 200:
             # split bugs 50/50 between fix and where tasks, so no issue is used for both
             if zlib.crc32(row["instance_id"].encode()) % 2 == 0:
                 picked["fix"].append(row["instance_id"])
